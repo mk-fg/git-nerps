@@ -5,8 +5,11 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses .gitattributes and git configuration options in general for configuration,
-PyNaCl encryption (nacl crypto_box) and python scripts/tools to tie it all together.
+Uses PyNaCl encryption (nacl crypto_box), gitattributes and git-config for
+configuration storage, which is partly shared with git.
+
+All the stuff is implemented as one python script, which has different commands.
+See --help output for a full list of these.
 
 
 
@@ -47,9 +50,17 @@ word for it?
 
 * Initialize key(s).
 
+  * cmd: key-gen
+  * cmd: key-set
+  * note on key names
+  * note on files
+
 * Initialize repository configuration.
 
   * Specify key or keys.
+
+    * cmd: key-set
+    * note on key detection and names
 
   * .gitattributes vs .git/info/attributes.
 
@@ -132,3 +143,38 @@ Drawbacks, quirks and warnings
 
 
 .. _this letter by Junio C Hamano: http://article.gmane.org/gmane.comp.version-control.git/113221
+
+
+
+Affected files and git-config params
+------------------------------------
+
+All files are using git configuration formats - either gitconfig or
+gitattributes, more info on which can be found in git-config(1).
+
+
+Files
+`````
+
+* .git/config, $GIT_CONFIG or whatever git-config(1) detects.
+* ~/.git-nerps-keys - per-user git-config file for crypto keys only.
+
+
+git-config values
+`````````````````
+
+* nerps.n-e-r-p-s - placeholder key to work around `long-standing git-config bug
+  with empty sections`_.
+
+* nerps.version - integer version of configuration, for easy (and hands-off)
+  future migrations from older ones when config format changes.
+
+* nerps.key.X - individual crypto keys, where X is the key name.
+
+* nerps.key-default - default crypto key **name** (stored as value).
+
+git splits these into sections inside the file, but flat key-value output can be
+produced by ``git config --list`` (add ``--file /path/to/config`` for any random
+config path).
+
+.. _long-standing git-config bug with empty sections: http://stackoverflow.com/questions/15935624/how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
