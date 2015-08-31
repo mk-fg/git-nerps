@@ -3,9 +3,10 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses PyNaCl encryption (`NaCl crypto_secretbox`_), gitattributes and git-config
-for configuration storage, which is partly shared with git and can be
-edited/adjusted by hand as well.
+Uses PyNaCl encryption (`NaCl crypto_secretbox`_, see "Encryption details"
+section below for more info), gitattributes and git-config for configuration
+storage, which is partly shared with git and can be edited/adjusted by hand as
+well.
 
 All the stuff is implemented as one python (python2!) script, which has
 different commands.  See --help output for a full list of these.
@@ -239,16 +240,24 @@ Encryption process in pseudocode::
 
   git_output_data = header || '\n\n' || ciphertext_base64
 
+"crypto_secretbox()" corresponds to `NaCl crypto_secretbox`_ routine (with
+PyNaCl wrapper), which is a combination of Salsa20 stream cipher and and
+Poly1305 authenticatior in one easy-to-use and secure package, implemented and
+maintained by very smart and skilled people (djb being the main author).
+
 Nonce here is derived from plaintext hash, which should exclude possibility of
 reuse for different plaintexts, yet provide deterministic output for the same
 file.
 
-Note that no key id is present in the output data, but since this is
-authenticated encryption, it is still possible to determine which key ciphertext
+Note that key-id is not present in the output data, but since this is
+authenticated encryption, it's still possible to determine which key ciphertext
 should be decrypted with by just trying them all until authentication succeeds.
 
 "version_ascii" is just "1" or such, encoded in there in case encryption
 algorithm might change in the future.
+
+Weird unicode stuff in the "header" is an arbitrary mark to be able to easily
+and kinda-reliably tell if file is encrypted by the presence of that watermark.
 
 
 
