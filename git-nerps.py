@@ -4,7 +4,8 @@ from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
 from contextlib import contextmanager
-from os.path import join, expanduser, realpath, dirname
+from os.path import ( join, expanduser, isdir,
+	realpath, dirname, abspath, exists, samefile, normpath )
 import os, sys, io, re, types, logging
 import stat, tempfile, fcntl, subprocess
 import hmac, hashlib
@@ -20,6 +21,7 @@ class Conf(object):
 
 	umask = 0700 # for files where keys are stored
 
+	script_link = '~/.git-nerps'
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
@@ -81,8 +83,10 @@ safe_replacement.cancel = CancelFileReplacement
 
 @contextmanager
 def edit(path):
-	with open(path, 'rb') as src, safe_replacement(path) as tmp:
-		yield src, tmp
+	with safe_replacement(path) as tmp:
+		if not exists(path): yield None, tmp
+		else:
+			with open(path, 'rb') as src: yield src, tmp
 
 edit.cancel = CancelFileReplacement
 
@@ -100,6 +104,40 @@ def with_src_lock(shared=False):
 		return _wrapper
 	return _decorator
 
+def relpath(path, from_path):
+	path, from_path = it.imap(abspath, (path, from_path))
+	if isdir(from_path): from_path += os.sep
+	from_path = dirname(from_path)
+	path, from_path = it.imap(lambda x: x.split(os.sep), (path, from_path))
+	for i in xrange(min(len(from_path), len(path))):
+		if from_path[i] != path[i]: break
+		else: i +=1
+	return join(*([os.pardir] * (len(from_path)-i) + path[i:]))
+
+def path_escape(path):
+	assert path.strip() == path, repr(path) # trailing spaces should be escaped
+	for c in '#!':
+		if path.startswith(c): path = r'\{}{}'.format(c, path[1:])
+	return path.replace('*', r'\*')
+
+def filter_git_patterns(src, tmp, path_rel, _ree=re.escape):
+	if not src: src = io.BytesIO()
+	for n, line in enumerate(iter(src.readline, ''), 1):
+		ls = line.strip()
+		assert not ls.endswith('\\'), repr(line) # not handling these escapes
+		if ls and not ls.startswith('#'):
+			pat, filters = ls.split(None, 1)
+			pat_re = _ree(pat.lstrip('/')).replace(_ree('**'), r'(.+)').replace(_ree('*'), r'([^\/]+)')
+			if '/' in pat: pat_re = '^{}'.format(pat_re)
+			if re.search(pat_re, path_rel):
+				act = yield n, line, pat, filters
+		if not act: tmp.write('{}\n'.format(line.rstrip()))
+		elif isinstance(act, bytes): tmp.write('{}\n'.format(act.rstrip()))
+		elif act is filter_git_patterns.remove: pass
+		else: raise ValueError(act)
+
+filter_git_patterns.remove = object()
+
 def cached_result(key_or_func=None, _key=None):
 	if callable(key_or_func):
 		_key = _key or key_or_func.func_name
@@ -116,8 +154,6 @@ class GitWrapperError(Exception): pass
 
 class GitWrapper(object):
 
-	run_error = subprocess.CalledProcessError
-
 	def __init__(self, conf, nacl):
 		self.conf, self.nacl, self.c, self.lock = conf, nacl, dict(), None
 		self.log = logging.getLogger('git')
@@ -127,6 +163,7 @@ class GitWrapper(object):
 		return self
 	def __exit__(self, *err): self.destroy()
 	def __del__(self): self.destroy()
+
 
 	def init(self): pass # done lazily
 
@@ -145,10 +182,11 @@ class GitWrapper(object):
 			self.lock = None
 
 
-
 	@property
 	@cached_result
 	def dev_null(self): return open(os.devnull, 'wb')
+
+	run_error = subprocess.CalledProcessError
 
 	def run(self, args=None, check=False, no_stderr=False, trap_code=None):
 		kws = dict(close_fds=True)
@@ -162,8 +200,9 @@ class GitWrapper(object):
 		except self.run_error as err:
 			if check: return False
 			if trap_code:
-				if isinstance(trap_code, (int, long)): trap_code = [trap_code]
-				if err.returncode in trap_code: err = res = None
+				if trap_code is True: pass
+				elif isinstance(trap_code, (int, long)): trap_code = [trap_code]
+				if trap_code is True or err.returncode in trap_code: err = res = None
 			if err: raise
 		return res if not check else True
 
@@ -208,11 +247,33 @@ class GitWrapper(object):
 		ver = run_conf(['--get', ver_k], trap_code=1) or None
 		if ver: ver = int(ver[0])
 		if not ver or ver < self.conf.git_conf_version:
+
 			if not ver:
+				if not os.access(__file__, os.X_OK):
+					self.log.warn( 'This script (%r) must be executable'
+						' (e.g. run "chmod +x" on it) for git filters to work!' )
+				script_link_abs = expanduser(self.conf.script_link)
+				if not exists(script_link_abs) or not samefile(script_link_abs, __file__):
+					try: os.unlink(script_link_abs)
+					except (OSError, IOError): pass
+					os.symlink(abspath(__file__), script_link_abs)
+
+				run_conf(['--remove-section', 'filter.nerps'], trap_code=True)
+				run_conf(['--remove-section', 'diff.nerps'], trap_code=True)
+
+				script_cmd = ft.partial('{} {}'.format, self.conf.script_link)
+				run_conf(['--add', 'filter.nerps.clean', script_cmd('git-clean')])
+				run_conf(['--add', 'filter.nerps.smudge', script_cmd('git-smudge')])
+				run_conf(['--add', 'diff.nerps.textconv', script_cmd('git-diff')])
+
+				# See "Performing text diffs of binary files" in gitattributes(5)
+				run_conf([ '--add', 'diff.nerps.cachetextconv', 'true'])
+
 				# Placeholder item to work around long-standing bug with removing last value from a section
 				# See: http://stackoverflow.com/questions/15935624/\
 				#  how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
 				run_conf(['--add', self.param('n-e-r-p-s'), 'NERPS'])
+
 			else: run_conf(['--unset-all', ver_k], trap_code=5)
 			# Any future migrations go here
 			run_conf(['--add', ver_k, bytes(self.conf.git_conf_version)])
@@ -235,7 +296,7 @@ class GitWrapper(object):
 	@property
 	@cached_result
 	def key_name_default(self):
-		name = self.run_conf(['--get', self.param('key-default')])
+		name = self.run_conf(['--get', self.param('key-default')], trap_code=1)
 		name, = name or [None]
 		return name
 
@@ -311,6 +372,7 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 
 def run_command(opts, conf, nacl, git):
 	log = logging.getLogger(opts.cmd)
+	exit_code = 0
 
 	##########
 	if opts.cmd == 'key-gen':
@@ -398,6 +460,12 @@ def run_command(opts, conf, nacl, git):
 			src=sys.stdin, dst=sys.stdout, strict=opts.name_strict )
 		sys.stdout.close() # to make sure no garbage data will end up there
 
+	##########
+	elif opts.cmd == 'git-diff':
+		decrypt( conf, nacl, git, log, opts.name,
+			src=open(opts.path, 'rb'), dst=sys.stdout, strict=opts.name_strict )
+		sys.stdout.close() # to make sure no garbage data will end up there
+
 
 	##########
 	elif opts.cmd == 'encrypt':
@@ -419,7 +487,59 @@ def run_command(opts, conf, nacl, git):
 				src=sys.stdin, dst=sys.stdout, strict=opts.name_strict )
 
 
+	##########
+	elif opts.cmd in ('taint', 'untaint'):
+		if not git.check(): opts.parser.error('Can only be run inside git repository')
+
+		for path in opts.path:
+			path_rel = relpath(path, git.sub('..'))
+			assert not re.search(r'^(\.|/)', path_rel), path_rel
+			attrs_file = normpath(git.sub(
+				'../.gitattributes' if not opts.local_only else 'info/attributes' ))
+
+			with edit(attrs_file) as (src, tmp):
+				n, matches_mark, matches = None, dict(), filter_git_patterns(src, tmp, path_rel)
+				while True:
+					try: n, line, pat, filters = next(matches) if n is None else matches.send(act)
+					except StopIteration: break
+					act = None
+					if opts.cmd == 'taint':
+						if not opts.force:
+							if not opts.silent:
+								log.error( 'gitattributes (%r) already has matching'
+									' pattern for path %r, not adding another one (line %s): %r',
+									attrs_file, path_rel, n, line )
+								# XXX: check if that line also has matching filter, add one
+								exit_code = 1
+							raise edit.cancel
+					if opts.cmd == 'untaint':
+						# XXX: check if line has actually **matching** filter
+						matches_mark[n] = line
+
+				if opts.cmd == 'taint':
+					tmp.write('/{} filter=nerps diff=nerps\n'.format(path_escape(path_rel)))
+
+				if opts.cmd == 'untaint':
+					if not matches_mark:
+						if not opts.silent:
+							log.error( 'gitattributes (%r) pattern'
+								' for path %r was not found', attrs_file, path_rel )
+							exit_code = 1
+						raise edit.cancel
+					if not opts.force and len(matches_mark) > 1:
+						log.error( 'More than one gitattributes (%r) pattern was'
+							' found for path %r, aborting: %r', attrs_file, path_rel, matches_mark.values() )
+						exit_code = 1
+						raise edit.cancel
+					src.seek(0)
+					tmp.seek(0)
+					tmp.truncate()
+					for n, line in enumerate(iter(src.readline, ''), 1):
+						if n not in matches_mark: tmp.write(line)
+
+
 	else: opts.parser.error('Unrecognized command: {}'.format(opts.cmd))
+	return exit_code
 
 
 def main(args=None, defaults=None):
@@ -471,6 +591,8 @@ def main(args=None, defaults=None):
 	cmd.add_argument('-s', '--set-as-default', action='store_true',
 		help='Set generated key as default in whichever config it will be stored.')
 
+	# XXX: option to generate from ssh private key
+
 
 	cmd = 'Set default encryption key for a repo/homedir config.'
 	cmd = cmds.add_parser('key-set', help=cmd, description=cmd,
@@ -478,7 +600,6 @@ def main(args=None, defaults=None):
 			' Key name should be specified with the --name option.'
 			' If no --name will be specified and there is no default key set'
 				' or it no longer available, first (any) available key will be set as default.')
-
 	cmd.add_argument('name_arg', nargs='?',
 		help='Same as using global --name option, but overrides it if both are used.')
 
@@ -497,20 +618,60 @@ def main(args=None, defaults=None):
 		' Not used, since git supplies file contents'
 			' to stdin and expects processing results from stdout.')
 
+	cmd = 'Decrypt file when getting it from git repository for diff generation purposes.'
+	cmd = cmds.add_parser('git-diff', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
+	cmd.add_argument('path', help='Filename suppled by git.')
+
 
 	cmd = 'Encrypt file in-place or process stdin to stdout.'
 	cmd = cmds.add_parser('encrypt', help=cmd, description=cmd)
 	cmd.add_argument('path', help='Path to a file to encrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
-	cmd.add_argument('-f', '--force',
+	cmd.add_argument('-f', '--force', action='store_true',
 		help='Encrypt even if file appears to be encrypted already.')
 
 	cmd = 'Decrypt file in-place or process stdin to stdout.'
 	cmd = cmds.add_parser('decrypt', help=cmd, description=cmd)
 	cmd.add_argument('path', help='Path to a file to decrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
-	cmd.add_argument('-f', '--force',
+	cmd.add_argument('-f', '--force', action='store_true',
 		help='Decrypt even if file does not appear to be encrypted.')
+
+
+	cmd = 'Mark file(s) to be transparently encrypted in the current git repo.'
+	cmd = cmds.add_parser('taint', help=cmd, description=cmd,
+		epilog='Adds files to .gitattributes (default)'
+				' or .git/info/attributes (see --local-only option).')
+
+	cmd.add_argument('path', nargs='+', help='Path of a file to mark.')
+
+	cmd.add_argument('-f', '--force', action='store_true',
+		help='Add pattern to gitattributes even if'
+			' there are matching ones already, skip extra checks.')
+	cmd.add_argument('-s', '--silent', action='store_true',
+		help='Do not print any errors if file is already marked.')
+
+	cmd.add_argument('-l', '--local-only', action='store_true',
+		help='Add file to .git/info/attributes (which'
+			' does not usually get shared) instead of .gitattributes.')
+
+
+	cmd = 'Remove transparent encryption mark from a file(s).'
+	cmd = cmds.add_parser('untaint', help=cmd, description=cmd,
+		epilog='Removes file(s) from .gitattributes (default)'
+				' or .git/info/attributes (see --local-only option).')
+
+	cmd.add_argument('path', nargs='+', help='Path of a file to unmark.')
+
+	cmd.add_argument('-f', '--force', action='store_true',
+		help='Remove any number of any matching patterns from gitattributes, skip extra checks.')
+	cmd.add_argument('-s', '--silent', action='store_true',
+		help='Do not print any errors if file does not seem to be marked.')
+
+	cmd.add_argument('-l', '--local-only', action='store_true',
+		help='Remove pattern from .git/info/attributes (which'
+			' does not usually get shared) instead of .gitattributes.')
 
 
 	opts = parser.parse_args(args)

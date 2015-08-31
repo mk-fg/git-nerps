@@ -55,15 +55,13 @@ Below I frequently use shorthand "attrs" for git attributes (stored in
 I'll also call "to be encrypted" mark on files "taint", because why not have one
 word for it?
 
-* Initialize key(s).
+* Initialize keys and repository configuration.
 
   * cmd: key-gen
   * cmd: key-set
   * note on key names
   * note on files
   * unlock comitted key with gpg?
-
-* Initialize repository configuration.
 
   * Specify key or keys.
 
@@ -80,7 +78,7 @@ word for it?
 
 * Taint only specific part of a file(s).
 
-* Change key used for a tainted file(s).
+* Change key used for tainted file(s).
 
 * Remove accidentally comitted secret from a repository history.
 
@@ -181,6 +179,8 @@ Files
 `````
 
 * .git/config, $GIT_CONFIG or whatever git-config(1) detects.
+
+* ~/.git-nerps - symlink to the script, to be used in git configs.
 
 * ~/.git-nerps-keys - per-user git-config file for crypto keys only.
 
