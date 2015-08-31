@@ -341,8 +341,8 @@ def is_encrypted(conf, src_or_line, rewind=True):
 		line = src_or_line.readline()
 		src_or_line.seek(pos)
 		src_or_line = line
-	nerps = src_or_line.strip().split(None, 1)[0]
-	return nerps == conf.enc_watermark
+	nerps = src_or_line.strip().split(None, 1)
+	return nerps and nerps[0] == conf.enc_watermark
 
 def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	key = git.key(name)
@@ -480,7 +480,12 @@ def run_command(opts, conf, nacl, git):
 
 	##########
 	elif opts.cmd == 'git-clean':
-		encrypt(conf, nacl, git, log, opts.name, src=sys.stdin, dst=sys.stdout)
+		src = io.BytesIO(sys.stdin.read())
+		if is_encrypted(conf, src):
+			log.error( '(Supposedly) plaintext file contents'
+				' seem to be already encrypted, refusing to encrypt: %r', opts.path)
+			return 1
+		encrypt(conf, nacl, git, log, opts.name, src=src, dst=sys.stdout)
 		sys.stdout.close() # to make sure no garbage data will end up there
 
 	##########
