@@ -1,8 +1,6 @@
 git-nerps
 =========
 
-**In early stages of development, not usable yet.**
-
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
 Uses PyNaCl encryption (`NaCl crypto_secretbox`_), gitattributes and git-config
@@ -55,6 +53,8 @@ Below I frequently use shorthand "attrs" for git attributes (stored in
 I'll also call "to be encrypted" mark on files "taint", because why not have one
 word for it?
 
+TODO: fill in stuff below
+
 * Initialize keys and repository configuration.
 
   * cmd: key-gen
@@ -81,6 +81,13 @@ word for it?
 * Change key used for tainted file(s).
 
 * Remove accidentally comitted secret from a repository history.
+
+
+
+Installation
+------------
+
+TODO: PyNaCl and ln -s to /usr/local/bin or something
 
 
 
