@@ -134,6 +134,8 @@ def git_conf_init(gitconfig):
 		tempfile.gettempdir(), '.git-nerps.{}.lock'.format(conf_id) ), 'ab+')
 	fcntl.lockf(git_conf_init.lock, fcntl.LOCK_EX)
 
+	# XXX: chmod here for git dir and files
+
 	git_conf_cmd = ['config', '--file', gitconfig]
 	ver_k = git_param('version')
 	ver = git(git_conf_cmd + ['--get', ver_k], trap_code=1) or None

@@ -5,11 +5,18 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses PyNaCl encryption (nacl crypto_box), gitattributes and git-config for
-configuration storage, which is partly shared with git.
+Uses PyNaCl encryption (`NaCl crypto_secretbox`_), gitattributes and git-config
+for configuration storage, which is partly shared with git and can be
+edited/adjusted by hand as well.
 
-All the stuff is implemented as one python script, which has different commands.
-See --help output for a full list of these.
+All the stuff is implemented as one python (python2!) script, which has
+different commands.  See --help output for a full list of these.
+
+.. _NaCl crypto_secretbox: http://nacl.cr.yp.to/secretbox.html
+
+
+.. contents::
+  :backlinks: none
 
 
 
@@ -54,6 +61,7 @@ word for it?
   * cmd: key-set
   * note on key names
   * note on files
+  * unlock comitted key with gpg?
 
 * Initialize repository configuration.
 
@@ -139,6 +147,21 @@ Drawbacks, quirks and warnings
   keys for N copies of data, just maybe in different (more private) places.
 
 
+* Encryption keys are stored in "repo/.git/config" or "~/.git-nerps-keys".
+
+  It is very important to protect and NOT to loose or share/leak these files.
+
+  Be sure to keep that in mind when copying repository without "git clone" or
+  sharing dev copies/environments between users or machines.
+
+  Tool changes modes on "repo/.git" and "repo/.git/config" to make sure there's
+  no extra access there. Git should not mess these up, bit it might be worth to
+  keep modes on these paths in mind when messing with them.
+
+  Never allow access to "repo/.git" directory over http(s) - alas, fairly common
+  security issue, for many different reasons, but here especially so.
+
+
 * Name of the tool literally makes no sense. NERPS.
 
 
@@ -157,6 +180,7 @@ Files
 `````
 
 * .git/config, $GIT_CONFIG or whatever git-config(1) detects.
+
 * ~/.git-nerps-keys - per-user git-config file for crypto keys only.
 
 
@@ -178,3 +202,132 @@ produced by ``git config --list`` (add ``--file /path/to/config`` for any random
 config path).
 
 .. _long-standing git-config bug with empty sections: http://stackoverflow.com/questions/15935624/how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
+
+
+
+Links
+-----
+
+
+* `git-crypt project <https://www.agwa.name/projects/git-crypt/>`__
+
+  | Similar tool and a first thing I checked before writing this.
+  | Decided against using it for variety of reasons.
+
+  Crypto used there is AES-CTR with OpenSSL, which is a huge red flag:
+
+  * Every other thing on top of OpenSSL uses it in a very wrong way.
+
+    `This HN comments thread <https://news.ycombinator.com/item?id=7556407>`__
+    actually has a comment from git-crypt author (agwa) on top, highlighting the issue:
+
+      I've done quite a bit of programming with the OpenSSL library and this
+      article is only scratching the surface of the awfulness. Documentation is
+      horrible to non-existent, you really do need to go spelunking into the
+      source to figure out how things work, and the code really is that
+      horrible.
+
+      The worst thing is that error reporting is not consistent - sometimes -1
+      means error, other times 0 means error, other times 0 means success, and
+      sometimes it's a combination. This is really, really bad for a crypto
+      library since properly detecting errors is usually critical to security.
+
+    See also "OpenSSL is written by monkeys (2009)" parent link there and all
+    related criticism and horrible bugs coming out of that crap.
+
+    Willingly using that in a new project given the alternatives (like NaCl)
+    seems just bizzare to me.
+
+  * Listing all the issues with internals of OpenSSL is a form of public
+    entertainment (see e.g. opensslrampage.org) - it'll always be hilariously
+    bad, despite being worked on more lately.
+
+  * Even without OpenSSL, using non-AEAD in 201x is just nonsense.
+
+  * Shows remarkable commitment from author to do things very wrong.
+
+  Doesn't offer proper tools for key and git configuration management that I
+  want to have, lots of C++ code, has to be built/packaged.
+
+  See also some blog posts and notes on its usage:
+
+  * `Git Crypted <https://flatlinesecurity.com/posts/git-crypted/>`__
+
+  * `Protect secret data in git repo
+    <https://coderwall.com/p/kucyaw/protect-secret-data-in-git-repo>`__
+
+  * `Storing sensitive data in a git repository using git-crypt
+    <http://www.twinbit.it/en/blog/storing-sensitive-data-git-repository-using-git-crypt>`__
+
+  * `HN comments on the previous post <https://news.ycombinator.com/item?id=7508734>`__
+
+    These do have some useful info and feedback and comments from git-crypt
+    author himself, incl. description of some of its internals.
+
+
+* `git-encrypt <https://github.com/shadowhand/git-encrypt>`__ ("gitcrypt" tool).
+
+  Look at "gitcrypt" bash script for these:
+
+  * ``DEFAULT_CIPHER="aes-256-ecb"``
+
+    AES-ECB is plain insecure (and has been used as a "doing it wrong" example
+    for decades!!!), and there's no conceivable reason to ever use it for new
+    projects except a total lack of knowledge in the area.
+
+  * ``openssl enc -base64 -$CIPHER -S "$SALT" -k "$PASS"``
+
+    Yep, and every pid running in the same namespace (i.e. on the system), can
+    easily see this "$PASS" (i.e. run "ps" in a loop and you get it).
+
+    See also comments on OpenSSL in git-crypt link above.
+
+  Just these two are enough to know where this project stands, but it also has
+  lacking and unusable trying-to-be-interactive interface and lot of other issues.
+
+  It's really bad.
+
+
+* `transcrypt <https://github.com/elasticdog/transcrypt>`__
+
+  More competent "simple bash wrapper" implementation than git-encrypt above,
+  but lacking good configuration management cli, e.g.::
+
+    ### Designate a File to be Encrypted
+
+    ...
+
+    $ cd <path-to-your-repo>/
+    $ echo 'sensitive_file  filter=crypt diff=crypt' >> .gitattributes
+    $ git add .gitattributes sensitive_file
+    $ git commit -m 'Add encrypted version of a sensitive file'
+
+  Such manual changes to .gitattributes are exactly the kind of thing I'd rather
+  have the tool for, same as "git add" here doesn't require you to edit a few
+  configs to include new file there.
+
+  Key management is fairly easy and behind-the-scenes though, and code does
+  crypto mostly right, despite all the openssl shortcomings and with some
+  caveats (mentioned in the readme there).
+
+  Upside is that it doesn't require python or extra crytpo modules like PyNaCl -
+  bash and openssl are available anywhere.
+
+
+* `git-remote-gcrypt <https://github.com/bluss/git-remote-gcrypt>`__
+
+  Designed to do very different thing from git-crypt or this project, which is
+  to encrypt whole repository in bulk with gpg (when pushing to remote).
+
+  Probably much better choice than this project for that particular task.
+
+
+* `ejson <https://github.com/Shopify/ejson>`__,
+  `jaeger <https://github.com/jyap808/jaeger>`__ and such.
+
+  There's plenty of "encrypt values in JSON" tools, not really related to git,
+  but can be (and generally are) used for secrets in JSON configurations shared
+  between different machines/containers.
+
+
+* `gitattributes(5) manpage <https://git-scm.com/docs/gitattributes>`__
