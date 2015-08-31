@@ -50,9 +50,11 @@ class NaCl(object):
 	def key_encode(self, key):
 		return key.encode(self.URLSafeBase64Encoder)
 
-	def key_decode(self, key_str, t=None, raw=False):
+	def key_decode(self, key_str, name=None, t=None, raw=False):
 		enc = self.URLSafeBase64Encoder if not raw else self.RawEncoder
-		return (t or self.SecretBox)(key_str, enc)
+		key = (t or self.SecretBox)(key_str, enc)
+		if name: key.name = name
+		return key
 
 
 @contextmanager
@@ -216,8 +218,8 @@ class GitWrapper(object):
 
 
 	def _key_iter(self):
-		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(git.param('key'))))
-		for line in git.run_conf(['--list']):
+		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(self.param('key'))))
+		for line in self.run_conf(['--list']):
 			k, v = line.split('=', 1)
 			m = key_re.search(k)
 			if not m: continue
@@ -233,14 +235,14 @@ class GitWrapper(object):
 	@property
 	@cached_result
 	def key_name_any(self):
-		try: k, v = next(self._key_name_iter())
+		try: k, v = next(self._key_iter())
 		except StopIteration: return
 		return k
 
 	@property
 	@cached_result
 	def key_all(self):
-		return map(op.itemgetter(1), self._key_name_iter())
+		return list(self.nacl.key_decode(key, name) for name, key in self._key_iter())
 
 	def key(self, name=None):
 		name = name or self.key_name_default or self.key_name_any
@@ -252,7 +254,7 @@ class GitWrapper(object):
 				' but is unavailable (in config: {!r})' ).format(name, self.path_conf))
 		key, = key
 		self.log.debug('Using key: %s', name)
-		return self.nacl.key_decode(key)
+		return self.nacl.key_decode(key, name)
 
 
 def run_command(opts, conf, nacl, git):
@@ -352,8 +354,19 @@ def run_command(opts, conf, nacl, git):
 		assert nerps == 'nerps', nerps
 		assert int(ver) <= conf.git_conf_version, ver
 		ciphertext = sys.stdin.read().strip().decode('base64')
-		plaintext = key.decrypt(ciphertext)
-		# XXX: test other keys if this one fails
+		try: plaintext = key.decrypt(ciphertext)
+		except nacl.CryptoError:
+			if opts.name_strict: raise
+			err_t, err, err_tb = sys.exc_info()
+			log.debug( 'Failed to decrypt with %s key %r: %s',
+				'default' if not opts.name else 'specified', key.name, err )
+			for key_chk in git.key_all:
+				if key_chk.name == key.name: continue
+				log.debug('Trying key: %s', key_chk.name)
+				try: plaintext = key_chk.decrypt(ciphertext)
+				except nacl.CryptoError: pass
+				else: break
+			else: raise err_t, err, err_tb
 		sys.stdout.write(plaintext)
 		sys.stdout.close() # to make sure no garbage data will end up there
 
@@ -377,6 +390,10 @@ def main(args=None, defaults=None):
 				' picked either as a first one or the one explicitly set as such.'
 			' When generating new key, default is to pick some'
 				' unused name from the phonetic alphabet letters.')
+
+	parser.add_argument('-s', '--name-strict',
+		help='Only try specified or default key for decryption.'
+			' Default it to try other ones if that one fails, to see if any of them work for a file.')
 
 	cmds = parser.add_subparsers(
 		dest='cmd', title='Actions',
