@@ -488,7 +488,7 @@ def run_command(opts, conf, nacl, git):
 
 
 	##########
-	elif opts.cmd in ('taint', 'untaint'):
+	elif opts.cmd in ('taint', 'clear'):
 		if not git.check(): opts.parser.error('Can only be run inside git repository')
 
 		for path in opts.path:
@@ -512,14 +512,14 @@ def run_command(opts, conf, nacl, git):
 								# XXX: check if that line also has matching filter, add one
 								exit_code = 1
 							raise edit.cancel
-					if opts.cmd == 'untaint':
+					if opts.cmd == 'clear':
 						# XXX: check if line has actually **matching** filter
 						matches_mark[n] = line
 
 				if opts.cmd == 'taint':
 					tmp.write('/{} filter=nerps diff=nerps\n'.format(path_escape(path_rel)))
 
-				if opts.cmd == 'untaint':
+				if opts.cmd == 'clear':
 					if not matches_mark:
 						if not opts.silent:
 							log.error( 'gitattributes (%r) pattern'
@@ -658,7 +658,7 @@ def main(args=None, defaults=None):
 
 
 	cmd = 'Remove transparent encryption mark from a file(s).'
-	cmd = cmds.add_parser('untaint', help=cmd, description=cmd,
+	cmd = cmds.add_parser('clear', help=cmd, description=cmd,
 		epilog='Removes file(s) from .gitattributes (default)'
 				' or .git/info/attributes (see --local-only option).')
 
