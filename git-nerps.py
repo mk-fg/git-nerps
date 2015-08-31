@@ -5,7 +5,7 @@ from __future__ import print_function
 import itertools as it, operator as op, functools as ft
 from contextlib import contextmanager
 from os.path import join, expanduser, realpath, dirname
-import os, sys, re, stat, logging
+import os, sys, io, re, stat, logging
 import tempfile, fcntl, subprocess
 import hmac, hashlib
 
@@ -23,9 +23,8 @@ class Conf(object):
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
-	def nonce_func(self, path, plaintext):
-		assert '\0' not in path, path
-		raw = hmac.new('nerps\0{}'.format(path), plaintext, hashlib.sha256).digest()
+	def nonce_func(self, plaintext):
+		raw = hmac.new('nerps', plaintext, hashlib.sha256).digest()
 		return raw[:self.nacl.SecretBox.NONCE_SIZE]
 
 	def __init__(self, nacl): self.nacl = nacl
@@ -257,6 +256,43 @@ class GitWrapper(object):
 		return self.nacl.key_decode(key, name)
 
 
+
+def encrypt(conf, nacl, git, log, name, src=None, dst=None):
+	key = git.key(name)
+	plaintext = src.read()
+	nonce = conf.nonce_func(plaintext)
+	ciphertext = key.encrypt(plaintext, nonce)
+	dst_stream = io.BytesIO() if not dst else dst
+	dst_stream.write('nerps {}\n\n'.format(conf.git_conf_version))
+	dst_stream.write(ciphertext.encode('base64'))
+	if not dst: return dst_stream.getvalue()
+
+
+def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
+	key = git.key(name)
+	header = src.readline()
+	nerps, ver = header.strip().split(None, 2)[:2]
+	assert nerps == 'nerps', nerps
+	assert int(ver) <= conf.git_conf_version, ver
+	ciphertext = src.read().strip().decode('base64')
+	try: plaintext = key.decrypt(ciphertext)
+	except nacl.CryptoError:
+		if strict: raise
+		err_t, err, err_tb = sys.exc_info()
+		log.debug( 'Failed to decrypt with %s key %r: %s',
+			'default' if not name else 'specified', key.name, err )
+		for key_chk in git.key_all:
+			if key_chk.name == key.name: continue
+			log.debug('Trying key: %s', key_chk.name)
+			try: plaintext = key_chk.decrypt(ciphertext)
+			except nacl.CryptoError: pass
+			else: break
+		else: raise err_t, err, err_tb
+	if dst: dst.write(plaintext)
+	else: return plaintext
+
+
+
 def run_command(opts, conf, nacl, git):
 	log = logging.getLogger(opts.cmd)
 
@@ -337,38 +373,32 @@ def run_command(opts, conf, nacl, git):
 
 	##########
 	elif opts.cmd == 'git-clean':
-		key = git.key(opts.name)
-		plaintext = sys.stdin.read()
-		nonce = conf.nonce_func(opts.path, plaintext)
-		ciphertext = key.encrypt(plaintext, nonce)
-		sys.stdout.write('nerps {}\n\n'.format(conf.git_conf_version))
-		sys.stdout.write(ciphertext.encode('base64'))
+		encrypt(conf, nacl, git, log, opts.name, src=sys.stdin, dst=sys.stdout)
+		sys.stdout.close() # to make sure no garbage data will end up there
+
+	##########
+	elif opts.cmd == 'git-smudge':
+		decrypt( conf, nacl, git, log, opts.name,
+			src=sys.stdin, dst=sys.stdout, strict=opts.name_strict )
 		sys.stdout.close() # to make sure no garbage data will end up there
 
 
 	##########
-	elif opts.cmd == 'git-smudge':
-		key = git.key(opts.name)
-		header = sys.stdin.readline()
-		nerps, ver = header.strip().split(None, 2)[:2]
-		assert nerps == 'nerps', nerps
-		assert int(ver) <= conf.git_conf_version, ver
-		ciphertext = sys.stdin.read().strip().decode('base64')
-		try: plaintext = key.decrypt(ciphertext)
-		except nacl.CryptoError:
-			if opts.name_strict: raise
-			err_t, err, err_tb = sys.exc_info()
-			log.debug( 'Failed to decrypt with %s key %r: %s',
-				'default' if not opts.name else 'specified', key.name, err )
-			for key_chk in git.key_all:
-				if key_chk.name == key.name: continue
-				log.debug('Trying key: %s', key_chk.name)
-				try: plaintext = key_chk.decrypt(ciphertext)
-				except nacl.CryptoError: pass
-				else: break
-			else: raise err_t, err, err_tb
-		sys.stdout.write(plaintext)
-		sys.stdout.close() # to make sure no garbage data will end up there
+	elif opts.cmd == 'encrypt':
+		if opts.path:
+			with edit(opts.path) as (src, tmp):
+				encrypt(conf, nacl, git, log, opts.name, src=src, dst=tmp)
+		else: encrypt(conf, nacl, git, log, opts.name, src=sys.stdin, dst=sys.stdout)
+
+	##########
+	elif opts.cmd == 'decrypt':
+		if opts.path:
+			with edit(opts.path) as (src, tmp):
+				decrypt( conf, nacl, git, log, opts.name,
+					src=src, dst=tmp, strict=opts.name_strict )
+		else:
+			decrypt( conf, nacl, git, log, opts.name,
+				src=sys.stdin, dst=sys.stdout, strict=opts.name_strict )
 
 
 	else: opts.parser.error('Unrecognized command: {}'.format(opts.cmd))
@@ -439,15 +469,26 @@ def main(args=None, defaults=None):
 	cmd = cmds.add_parser('git-clean', help=cmd, description=cmd,
 		epilog='Intended to be only used by git, use "encrypt" command from terminal instead.')
 	cmd.add_argument('path', help='Filename suppled by git.'
-		' Only used for nonce derivation, as git supplies'
-			' file contents to stdin and expects processing results from stdout.')
+		' Not used, since git supplies file contents'
+			' to stdin and expects processing results from stdout.')
 
 	cmd = 'Decrypt file when getting it from git repository - "smudge" it with secrets.'
 	cmd = cmds.add_parser('git-smudge', help=cmd, description=cmd,
 		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
 	cmd.add_argument('path', help='Filename suppled by git.'
-		' Only used for nonce derivation, as git supplies'
-			' file contents to stdin and expects processing results from stdout.')
+		' Not used, since git supplies file contents'
+			' to stdin and expects processing results from stdout.')
+
+
+	cmd = 'Encrypt file in-place or process stdin to stdout.'
+	cmd = cmds.add_parser('encrypt', help=cmd, description=cmd)
+	cmd.add_argument('path', help='Path to a file to encrypt.'
+		' If not specified, stdin/stdout streams will be used instead.')
+
+	cmd = 'Decrypt file in-place or process stdin to stdout.'
+	cmd = cmds.add_parser('decrypt', help=cmd, description=cmd)
+	cmd.add_argument('path', help='Path to a file to decrypt.'
+		' If not specified, stdin/stdout streams will be used instead.')
 
 
 	opts = parser.parse_args(args)

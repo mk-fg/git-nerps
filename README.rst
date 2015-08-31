@@ -211,11 +211,11 @@ Encryption details
 
 Encryption process in pseudocode::
 
-  file_path, file_plaintext = git_input_data
+  file_plaintext = git_input_data
   secretbox_key, version_ascii = git_config_data
 
   nonce_32b = HMAC(
-    key = 'nerps\0' || file_path,
+    key = 'nerps',
     msg = file_plaintext,
     digest = sha256 )
 
