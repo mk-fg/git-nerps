@@ -350,8 +350,8 @@ def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	nonce = conf.nonce_func(plaintext)
 	ciphertext = key.encrypt(plaintext, nonce)
 	dst_stream = io.BytesIO() if not dst else dst
-	dst_stream.write('{} {}\n\n'.format(conf.enc_watermark, conf.git_conf_version))
-	dst_stream.write(ciphertext.encode('base64'))
+	dst_stream.write('{} {}\n'.format(conf.enc_watermark, conf.git_conf_version))
+	dst_stream.write(ciphertext)
 	if not dst: return dst_stream.getvalue()
 
 def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
@@ -360,7 +360,7 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 	nerps, ver = header.strip().split(None, 2)[:2]
 	assert nerps == conf.enc_watermark, nerps
 	assert int(ver) <= conf.git_conf_version, ver
-	ciphertext = src.read().strip().decode('base64')
+	ciphertext = src.read()
 	try: plaintext = key.decrypt(ciphertext)
 	except nacl.CryptoError:
 		if strict: raise

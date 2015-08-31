@@ -234,11 +234,9 @@ Encryption process in pseudocode::
     msg = plaintext,
     nonce = nonce )
 
-  ciphertext_base64 = base64_encode(ciphertext)
-
   header = '¯\_ʻnerpsʻ_/¯ ' || version_ascii
 
-  git_output_data = header || '\n\n' || ciphertext_base64
+  git_output_data = header || '\n' || ciphertext
 
 "crypto_secretbox()" corresponds to `NaCl crypto_secretbox`_ routine (with
 PyNaCl wrapper), which is a combination of Salsa20 stream cipher and and
