@@ -19,6 +19,14 @@ class Conf(object):
 
 	umask = 0700 # for files where keys are stored
 
+	git_conf_home = '~/.git-nerps-keys'
+	git_conf_version = 1
+
+	def nonce_func(self, path, plaintext):
+		assert '\0' not in path, path
+		raw = 'nerps\0{}\0{}'.format(path, plaintext)
+		return nacl.sha256(raw, nacl.RawEncoder)
+
 	def __repr__(self): return repr(vars(self))
 	def get(self, *k): return getattr(self, '_'.join(k))
 
@@ -36,6 +44,13 @@ class NaCl(object):
 			for mod, keys in self.imports.viewitems():
 				mod = importlib.import_module('nacl.{}'.format(mod))
 				for k in keys: setattr(self, k, getattr(mod, k))
+
+	def key_encode(self, key):
+		return key.encode(self.URLSafeBase64Encoder)
+
+	def key_decode(self, key_str, t=None, raw=False):
+		enc = self.URLSafeBase64Encoder if not raw else self.RawEncoder
+		return (t or self.SecretBox)(key_str, enc)
 
 
 @contextmanager
@@ -75,95 +90,237 @@ def with_src_lock(shared=False):
 	return _decorator
 
 
-def key_encode(key):
-	return key.encode(nacl.URLSafeBase64Encoder)
+class GitWrapper(object):
 
-def key_decode(key_str, t=None, raw=False):
-	enc = nacl.URLSafeBase64Encoder if not raw else nacl.RawEncoder
-	return (t or nacl.SecretBox)(key_str, enc)
+	run_error = subprocess.CalledProcessError
+
+	def __init__(self, conf, nacl):
+		self.conf, self.nacl, self.c, self.lock = conf, nacl, dict(), None
+		self.log = logging.getLogger('git')
+
+	def __enter__(self):
+		self.init()
+		return self
+	def __exit__(self, *err): self.destroy()
+	def __del__(self): self.destroy()
+
+	def init(self): pass # done lazily
+
+	def init_lock(self, gitconfig):
+		if self.lock: return
+		lock = self.nacl.sha256(realpath(gitconfig), self.nacl.URLSafeBase64Encoder)[:8]
+		lock = join(tempfile.gettempdir(), '.git-nerps.{}.lock'.format(lock))
+		self.lock = open(lock, 'ab+')
+		self.log.debug('Acquiring lock: %r', lock)
+		fcntl.lockf(self.lock, fcntl.LOCK_EX)
+
+	def destroy(self):
+		if self.lock:
+			self.log.debug('Releasing lock: %r', self.lock.name)
+			self.lock.close()
+			self.lock = None
 
 
-def dev_null():
-	if not hasattr(dev_null, 'cache'):
-		dev_null.cache = open(os.devnull, 'wb')
-	return dev_null.cache
+	def _cached_result(key):
+		def _decorator(func):
+			@ft.wraps(func)
+			def _wrapper(self, *args, **kws):
+				if key not in self.c:
+					self.c[key] = func(self, *args, **kws)
+				return self.c[key]
+			return _wrapper
+		return _decorator
 
-def git(args=None, check=False, no_stderr=False, trap_code=None):
-	kws = dict(close_fds=True)
-	if no_stderr: kws['stderr'] = dev_null()
-	args = ['git'] + list(args or list())
-	if log.isEnabledFor(logging.DEBUG):
-		opts = ', '.join( bytes(k) for k, v in
-			{'check': check, 'no-stderr': no_stderr, 'trap': trap_code}.items() if v )
-		log.debug('git-cmd: %s [%s]', ' '.join(args), opts or '-')
-	try: res = subprocess.check_output(args, **kws).splitlines()
-	except git.error as err:
-		if check: return False
-		if trap_code:
-			if isinstance(trap_code, (int, long)): trap_code = [trap_code]
-			if err.returncode in trap_code: err = res = None
-		if err: raise
-	return res if not check else True
-git.error = subprocess.CalledProcessError
+	@property
+	@_cached_result('dev-null')
+	def dev_null(self): return open(os.devnull, 'wb')
 
-def git_check(args=['rev-parse'], no_stderr=True):
-	return git(args, check=True, no_stderr=no_stderr)
+	def run(self, args=None, check=False, no_stderr=False, trap_code=None):
+		kws = dict(close_fds=True)
+		if no_stderr: kws['stderr'] = self.dev_null
+		args = ['git'] + list(args or list())
+		if self.log.isEnabledFor(logging.DEBUG):
+			opts = ', '.join( bytes(k) for k, v in
+				{'check': check, 'no-stderr': no_stderr, 'trap': trap_code}.items() if v )
+			self.log.debug('run: %s [%s]', ' '.join(args), opts or '-')
+		try: res = subprocess.check_output(args, **kws).splitlines()
+		except self.run_error as err:
+			if check: return False
+			if trap_code:
+				if isinstance(trap_code, (int, long)): trap_code = [trap_code]
+				if err.returncode in trap_code: err = res = None
+			if err: raise
+		return res if not check else True
 
-def git_dir(*path):
-	if not hasattr(git_dir, 'cache'):
-		p = git(['rev-parse', '--show-toplevel'])
-		assert len(p) == 1, [p, 'rev-cache --show-toplevel result']
-		git_dir.cache = join(p[0], '.git')
-	if not path: return git_dir.cache
-	return join(git_dir.cache, *path)
+	def check(self, args=['rev-parse'], no_stderr=True):
+		return self.run(args, check=True, no_stderr=no_stderr)
 
-def git_param(*path):
-	assert path and all(path), path
-	return 'nerps.{}'.format('.'.join(path))
+	def run_conf(self, args, gitconfig=None, **run_kws):
+		gitconfig = gitconfig or self.path_conf
+		return self.run(['config', '--file', gitconfig] + args, **run_kws)
 
-def git_conf_home():
-	if not hasattr(git_conf_home, 'cache'):
-		git_conf_home.cache = expanduser(git_conf_home.base)
-	return git_conf_home.cache
-git_conf_home.base = '~/.git-nerps-keys'
+	def sub(self, *path):
+		if not self.c.get('git-dir'):
+			p = self.run(['rev-parse', '--show-toplevel'])
+			assert len(p) == 1, [p, 'rev-cache --show-toplevel result']
+			self.c['git-dir'] = join(p[0], '.git')
+		if not path: return self.c['git-dir']
+		return join(self.c['git-dir'], *path)
 
-def git_conf():
-	if not hasattr(git_conf, 'cache'):
-		is_git_repo = git_check()
-		git_conf.cache = git_dir('config') if is_git_repo else git_conf_home()
-		git_conf_init(git_conf.cache, chmod_dir=is_git_repo)
-	return git_conf.cache
-git_conf.version = 1
+	def param(self, *path):
+		assert path and all(path), path
+		return 'nerps.{}'.format('.'.join(path))
 
-def git_conf_init(gitconfig, chmod_umask=None, chmod_dir=False):
-	assert not hasattr(git_conf_init, 'lock')
-	conf_id = nacl.sha256(realpath(gitconfig), nacl.URLSafeBase64Encoder)[:8]
-	git_conf_init.lock = open(join(
-		tempfile.gettempdir(), '.git-nerps.{}.lock'.format(conf_id) ), 'ab+')
-	fcntl.lockf(git_conf_init.lock, fcntl.LOCK_EX)
+	@property
+	@_cached_result('git-conf-home')
+	def path_conf_home(self):
+		return expanduser(self.conf.git_conf_home)
 
-	git_conf_cmd = ['config', '--file', gitconfig]
-	ver_k = git_param('version')
-	ver = git(git_conf_cmd + ['--get', ver_k], trap_code=1) or None
-	if ver: ver = int(ver[0])
-	if not ver or ver < git_conf.version:
-		if not ver:
-			# Placeholder item to work around long-standing bug with removing last value from a section
-			# See: http://stackoverflow.com/questions/15935624/\
-			#  how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
-			git(git_conf_cmd + ['--add', git_param('n-e-r-p-s'), 'NERPS'])
-		else: git(git_conf_cmd + ['--unset-all', ver_k], trap_code=5)
-		# Any future migrations go here
-		git(git_conf_cmd + ['--add', ver_k, bytes(git_conf.version)])
+	@property
+	@_cached_result('git-conf')
+	def path_conf(self):
+		is_git_repo = self.check()
+		gitconfig = self.sub('config') if is_git_repo else self.path_conf_home
+		self.path_conf_init(gitconfig, chmod_dir=is_git_repo)
+		return gitconfig
 
-	if chmod_umask is None: chmod_umask = conf.umask
-	if chmod_dir:
-		git_repo_dir = dirname(gitconfig)
-		os.chmod(git_repo_dir, os.stat(git_repo_dir).st_mode & chmod_umask)
-	os.chmod(gitconfig, os.stat(gitconfig).st_mode & chmod_umask)
+	def path_conf_init(self, gitconfig, chmod_umask=None, chmod_dir=False):
+		assert not self.lock
+		self.init_lock(gitconfig)
+
+		run_conf = ft.partial(self.run_conf, gitconfig=gitconfig)
+		ver_k = self.param('version')
+		ver = run_conf(['--get', ver_k], trap_code=1) or None
+		if ver: ver = int(ver[0])
+		if not ver or ver < self.conf.git_conf_version:
+			if not ver:
+				# Placeholder item to work around long-standing bug with removing last value from a section
+				# See: http://stackoverflow.com/questions/15935624/\
+				#  how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
+				run_conf(['--add', self.param('n-e-r-p-s'), 'NERPS'])
+			else: run_conf(['--unset-all', ver_k], trap_code=5)
+			# Any future migrations go here
+			run_conf(['--add', ver_k, bytes(self.conf.git_conf_version)])
+
+		if chmod_umask is None: chmod_umask = self.conf.umask
+		if chmod_dir:
+			git_repo_dir = dirname(gitconfig)
+			os.chmod(git_repo_dir, os.stat(git_repo_dir).st_mode & chmod_umask)
+		os.chmod(gitconfig, os.stat(gitconfig).st_mode & chmod_umask)
+
+	# @property
+	# @_cached_result('key')
+	# def key(self):
+	# 	name = self.run_conf(['--get', self.param('key-default')])
+	# 	if name:
+	# 		name, = name
+	# 		self.run_conf(['--get', self.param('key', name)])
+
+
+def run_command(opts, git, nacl):
+	log = logging.getLogger(opts.cmd)
+
+	##########
+	if opts.cmd == 'key-gen':
+		key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
+		key = nacl.key_decode(key_raw, raw=True)
+		key_str = nacl.key_encode(key)
+
+		if opts.print or opts.verbose:
+			print('Key:\n  ', key_str, '\n')
+			if opts.print: return
+
+		gitconfig = git.path_conf
+		run_conf = ft.partial(git.run_conf, gitconfig=gitconfig)
+
+		name = opts.name
+		if not name:
+			for name in git.conf.key_name_pool:
+				k = git.param('key', name)
+				if not run_conf(['--get', k], check=True, no_stderr=True): break
+			else:
+				raise opts.parser.error('Failed to find unused'
+					' key name, specify one explicitly with --name.')
+		k = git.param('key', name)
+
+		log.info('Adding key %r to gitconfig (k: %s): %r', name, k, gitconfig)
+
+		# To avoid flashing key on command line (which can be seen by any
+		#  user in same pid ns), "git config --add" is used with unique tmp_token
+		#  here, which is then replaced (in the config file) by actual key.
+
+		with open(gitconfig, 'rb') as src: gitconfig_str = src.read()
+		while True:
+			tmp_token = os.urandom(18).encode('base64').strip()
+			if tmp_token not in gitconfig_str: break
+
+		commit = False
+		try:
+			run_conf(['--add', k, tmp_token])
+			with edit(gitconfig) as (src, tmp):
+				gitconfig_str = src.read()
+				assert tmp_token in gitconfig_str, tmp_token
+				tmp.write(gitconfig_str.replace(tmp_token, key_str))
+			commit = True
+		finally:
+			if not commit: run_conf(['--unset', k])
+
+		if opts.set_as_default:
+			k = git.param('key-default')
+			run_conf(['--unset-all', k], trap_code=5)
+			run_conf(['--add', k, name])
+
+
+	##########
+	elif opts.cmd == 'key-set':
+		if opts.name_arg: opts.name = opts.name_arg
+
+		k_dst = git.param('key-default')
+
+		k = git.run_conf(['--get', k_dst])
+
+		if k: # make sure default key is the right one and is available
+			k, = k
+			k_updated = opts.name and k != opts.name and opts.name
+			if k_updated: k = opts.name
+			v = git.run_conf(['--get', git.param('key', k)])
+			if not v and opts.name:
+				opts.parser.error('Key %r was not found in config file: %r', k, git.path_conf)
+			k = None if not v else (k_updated or True) # True - already setup
+
+		if not k: # pick first random key
+			key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(git.param('key'))))
+			for line in git.run_conf(['--list']):
+				k, v = line.split('=', 1)
+				m = key_re.search(k)
+				if not m: continue
+				k = m.group(1)
+			else: k = None
+
+		if k and k is not True:
+			git.run_conf(['--unset-all', k_dst], trap_code=5)
+			git.run_conf(['--add', k_dst, k])
+
+
+	##########
+	elif opts.cmd == 'git-clean': pass
+		# key = git.key
+		# plaintext = sys.stdin.read()
+		# nonce = conf.nonce_func(opts.path, plaintext)
+		# ciphertext =
+
+
+
+	##########
+	elif opts.cmd == 'git-smudge': pass
+
+
+	else: opts.parser.error('Unrecognized command: {}'.format(opts.cmd))
 
 
 def main(args=None, defaults=None):
+	conf, nacl, args = defaults or Conf(), NaCl(), sys.argv[1:] if args is None else args
+
 	import argparse
 	parser = argparse.ArgumentParser(description='Tool to manage encrypted files in a git repo.')
 
@@ -200,7 +357,7 @@ def main(args=None, defaults=None):
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
-		help='Store new key in the {} file (in user home directory).'.format(git_conf_home.base))
+		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
 
 	cmd.add_argument('-s', '--set-as-default', action='store_true',
 		help='Set generated key as default in whichever config it will be stored.')
@@ -217,101 +374,32 @@ def main(args=None, defaults=None):
 		help='Same as using global --name option, but overrides it if both are used.')
 
 
-	opts = parser.parse_args(sys.argv[1:] if args is None else args)
+	cmd = 'Encrypt file before comitting it into git repository - "clean" from secrets.'
+	cmd = cmds.add_parser('git-clean', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "encrypt" command from terminal instead.')
+	cmd.add_argument('path', help='Filename suppled by git.'
+		' Only used for nonce derivation, as git supplies'
+			' file contents to stdin and expects processing results from stdout.')
 
-	global log, nacl, conf
+	cmd = 'Decrypt file when getting it from git repository - "smudge" it with secrets.'
+	cmd = cmds.add_parser('git-smudge', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
+	cmd.add_argument('path', help='Filename suppled by git.'
+		' Only used for nonce derivation, as git supplies'
+			' file contents to stdin and expects processing results from stdout.')
+
+
+	opts = parser.parse_args(args)
+
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
-	log = logging.getLogger()
-	nacl = NaCl()
-	conf = defaults or Conf()
+	log = logging.getLogger('main')
 
 	# To avoid influence from any of the system-wide aliases
 	os.environ['GIT_CONFIG_NOSYSTEM'] = 'true'
 
-
-	if opts.cmd == 'key-gen':
-		key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
-		key = key_decode(key_raw, raw=True)
-		key_str = key_encode(key)
-
-		if opts.print or opts.verbose:
-			print('Key:\n  ', key_str, '\n')
-			if opts.print: return
-
-		gitconfig = git_conf()
-		git_conf_cmd = ['config', '--file', gitconfig]
-
-		name = opts.name
-		if not name:
-			for name in conf.key_name_pool:
-				k = git_param('key', name)
-				if not git_check(git_conf_cmd + ['--get', k]): break
-			else:
-				raise parser.error('Failed to find unused'
-					' key name, specify one explicitly with --name.')
-		k = git_param('key', name)
-
-		log.info('Adding key %r to gitconfig (k: %s): %r', name, k, gitconfig)
-
-		# To avoid flashing key on command line (which can be seen by any
-		#  user in same pid ns), "git config --add" is used with unique tmp_token
-		#  here, which is then replaced (in the config file) by actual key.
-
-		with open(gitconfig, 'rb') as src: gitconfig_str = src.read()
-		while True:
-			tmp_token = os.urandom(18).encode('base64').strip()
-			if tmp_token not in gitconfig_str: break
-
-		commit = False
-		try:
-			git(git_conf_cmd + ['--add', k, tmp_token])
-			with edit(gitconfig) as (src, tmp):
-				gitconfig_str = src.read()
-				assert tmp_token in gitconfig_str, tmp_token
-				tmp.write(gitconfig_str.replace(tmp_token, key_str))
-			commit = True
-		finally:
-			if not commit: git(git_conf_cmd + ['--unset', k])
-
-		if opts.set_as_default:
-			k = git_param('key-default')
-			git(git_conf_cmd + ['--unset-all', k], trap_code=5)
-			git(git_conf_cmd + ['--add', k, name])
-
-
-	elif opts.cmd == 'key-set':
-		if opts.name_arg: opts.name = opts.name_arg
-
-		gitconfig = git_conf()
-		git_conf_cmd = ['config', '--file', gitconfig]
-		k_dst = git_param('key-default')
-
-		k = git(git_conf_cmd + ['--get', k_dst])
-
-		if k: # make sure default key is the right one and is available
-			k, = k
-			k_updated = opts.name and k != opts.name and opts.name
-			if k_updated: k = opts.name
-			v = git(git_conf_cmd + ['--get', git_param('key', k)])
-			if not v and opts.name:
-				parser.error('Key %r was not found in config file: %r', k, gitconfig)
-			k = None if not v else (k_updated or True) # True - already setup
-
-		if not k: # pick first random key
-			key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(git_param('key'))))
-			for line in git(git_conf_cmd + ['--list']):
-				k, v = line.split('=', 1)
-				m = key_re.search(k)
-				if not m: continue
-				k = m.group(1)
-			else: k = None
-
-		if k and k is not True:
-			git(git_conf_cmd + ['--unset-all', k_dst], trap_code=5)
-			git(git_conf_cmd + ['--add', k_dst, k])
-
-
-	else: parser.error('Unrecognized command: {}'.format(opts.cmd))
+	with GitWrapper(conf, nacl) as git:
+		opts.parser = parser
+		return run_command(opts, git, nacl)
 
 
 if __name__ == '__main__': sys.exit(main())

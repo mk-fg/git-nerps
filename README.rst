@@ -120,7 +120,8 @@ Drawbacks, quirks and warnings
 
 * As noted in `this letter by Junio C Hamano`_, it is unwise to fully encrypt
   files that get modified all the time, as that defeats the whole purpose of git
-  ("change" will always be "whole file") and especially its attrs mechanism.
+  ("change" will always be "whole file") and especially its attrs mechanism
+  (which is designed with almost opposite goals in mind).
 
   In addition to the above, git isn't well suited to store binary blobs in
   general, which encrypted files are.
@@ -331,3 +332,6 @@ Links
 
 
 * `gitattributes(5) manpage <https://git-scm.com/docs/gitattributes>`__
+
+
+* `Some other git filters that I use <https://github.com/mk-fg/fgtk/#dev>`__
