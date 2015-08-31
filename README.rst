@@ -3,7 +3,7 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses PyNaCl encryption (`NaCl crypto_secretbox`_, see "Encryption details"
+Uses PyNaCl_ encryption (`NaCl crypto_secretbox`_, see "Encryption details"
 section below for more info), gitattributes and git-config for configuration
 storage, which is partly shared with git and can be edited/adjusted by hand as
 well.
@@ -11,6 +11,7 @@ well.
 All the stuff is implemented as one python (python2!) script, which has
 different commands.  See --help output for a full list of these.
 
+.. _PyNaCl: http://pynacl.readthedocs.org/
 .. _NaCl crypto_secretbox: http://nacl.cr.yp.to/secretbox.html
 
 
@@ -29,66 +30,206 @@ I.e. imagine a bunch of containers which share some/most configs and keep their
 configuration in git branches.
 
 You'd like to easily pull, push, merge and cherry-pick between these
-repositories/branches, but each container has bits that should not be shared.
+repositories/branches, but each container has occasional bits that should not be
+shared.
 
 One solution is to keep secret files out of repository or in a separate one,
 another is to just have these encrypted.
-Then these can even be shared between containers that have access to same key,
+Such secrets can even be shared between containers that have access to same key,
 and not others.
 
 That way, only one short bit of data (key) has to be unique for a host, and
 presumably duplicated in some secure place, while the rest of the host's
-configuration can be shared or even public.
+configuration can be shared, well-replicated and/or public.
 
 Modifying .git/config and .gitattributes by hand gets old fast, plus one needs
-to store keys and have a dedicated tool/wrapper anyway, hence this project.
+to store keys and have a dedicated tool/wrapper for git filters anyway, hence
+this project.
 
 
 
 Usage
 -----
 
-Below I frequently use shorthand "attrs" for git attributes (stored in
-.gitattributes or .git/info/attributes files).
+See ``git-nerps --help`` for full list of all supported commands and common
+options, and e.g. ``git-nerps key-gen --help`` for args/opts to any particular
+command.
 
-I'll also call "to be encrypted" mark on files "taint", because why not have one
-word for it?
 
-TODO: fill in stuff below
+* Initialize repository configuration.
 
-* Initialize keys and repository configuration.
+  Same as with most commands below, only makes sense to run in a git repository.
 
-  * cmd: key-gen
-  * cmd: key-set
-  * note on key names
-  * note on files
-  * unlock comitted key with gpg?
+  ::
 
-  * Specify key or keys.
+    % git-nerps init
 
-    * cmd: key-set
-    * note on key detection and names
 
-  * .gitattributes vs .git/info/attributes.
+  This is done automatically on any meaningful action (e.g. "key-gen"), so can
+  usually be skipped.
 
-  * Find all encrypted files and auto-setup attrs.
+  Repository config ".git/config" should have these additional sections after
+  that::
 
-* Add and mark new files to be encrypted.
+    [filter "nerps"]
+      clean = ~/.git-nerps git-clean
+      smudge = ~/.git-nerps git-smudge
+    [diff "nerps"]
+      textconv = ~/.git-nerps git-diff
+      cachetextconv = true
+    [nerps]
+      n-e-r-p-s = NERPS
+      version = 1
 
-* Remove taint from files.
+  Any of these can be added and tweaked manually, see "git-config values"
+  section below for details on each parameter.
 
-* Taint only specific part of a file(s).
 
-* Change key used for tainted file(s).
+* Generate encryption keys.
 
-* Remove accidentally comitted secret from a repository history.
+  ::
+
+    % git-nerps key-gen
+
+    % tail -2 .git/config
+    [nerps "key"]
+      alfa = d2rmvoMBcPAcs-otYtbRH_WIIztXtg7ONcbGgzwcpQo=
+
+  Generated key with auto-picked name "alfa" was stored in ".git/config", as
+  demonstrated above.
+
+  It will be used by default if it's the only key available.
+
+  With >1 keys, "key-set" command can be used to pick which one to use for new
+  files (and "key-unset" to reset that selection), otherwise first key found in
+  the config is used.
+
+  Decryption uses all available keys by default.
+
+  Key names get picked from `phonetic alphabet`_, if not specified explicity -
+  i.e. alfa, bravo, charlie, etc - a set of words designed to be fairly
+  distinctive.
+
+  Keys can also be stored in user's home directory (and selected via "key-set"
+  with -d/--homedir option), and these will be available for all repositories,
+  but key explicitly set as "default" in the current repo will take priority.
+
+  Extended example (from a fresh repository)::
+
+    % git-nerps key-gen
+    % git-nerps key-gen
+
+    % git-nerps key-gen -v
+    Generated new key 'charlie':
+      SZi85A55-RWKNFvDqTsq0T_ArANBoZw8DKEojtrLA8o=
+
+    % git-nerps key-gen --homedir homer
+
+    % git-nerps key-list
+    alfa [default]
+    bravo
+    charlie
+    homer
+
+    % git-nerps key-set bravo
+    % git-nerps key-list
+    alfa
+    bravo [default]
+    charlie
+    homer
+
+    % git-nerps key-gen --set-as-default
+    % git-nerps key-list
+    alfa
+    bravo
+    charlie
+    delta [default]
+    homer
+
+    % git-nerps key-unset
+    % git-nerps key-set --homedir homer
+    % git-nerps key-list
+    alfa
+    bravo
+    charlie
+    delta
+    homer [default]
+
+  TODO: key-gen from local ssh private key
+
+  TODO: command to find all encrypted files and auto-setup attrs
+
+
+* Mark new files to be encrypted.
+
+  ::
+
+    % git ls-files
+    backup_script.sh
+
+    % cp ~/rsync_auth.txt .
+    % git-nerps taint rsync_auth.txt
+    % git add rsync_auth.txt .gitattributes
+    % git commit -a -m 'Add rsync auth data'
+
+    % git ls-files
+    .gitattributes
+    backup_script.sh
+    rsync_auth.txt
+
+  ``git-nerps taint`` will add ``/rsync_auth.txt filter=nerps diff=nerps`` line
+  to ".gitattributes" file (creating it, if necessary), so that contents of the
+  file in the repository will always be transparently encrypted.
+
+  This can be applied to files that are already in the repository, but that
+  command will NOT rebase whole commit history to wipe or encrypt that file
+  there - this can be done manually, but might be tricky (e.g. with many
+  branches).
+
+  ``git-nerps taint`` also has -l/--local-only option to use
+  ".git/info/attributes" (which is not shared between repo clones) instead to
+  the same effect.
+
+  ``git-nerps clear`` removes "taint" from file(s), if it's ever necessary.
+
+  Both "taint" and "clear" commands operate on gitattributes lines with patterns
+  matching repo-relative path to specified file(s), making sure that there's
+  exactly one such match (see also --force and --silent options), so it's
+  perfectly fine to add any valid patterns there by hand, these commands should
+  pick these up.
+
+  TODO: taints for parts of a file(s).
+
+  TODO: change key used for tainted file(s).
+
+
+TODO: how to remove accidentally comitted secret from a repository history.
+
+.. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
 
 
 
 Installation
 ------------
 
-TODO: PyNaCl and ln -s to /usr/local/bin or something
+Requirements:
+
+* Python 2.7 (NOT 3.X).
+
+* PyNaCl_ python module (has its own bundled NaCl lib copy).
+
+Both should be available in distro package repositories.
+PyNaCl can also be installed from PyPI via pip.
+
+Install git-nerps.py script to PATH and test if it works from there::
+
+	% install -m0755 git-nerps.py /usr/local/bin/git-nerps
+
+	% git-nerps -h
+	usage: git-nerps [-h] [-d] [-n key-name] [-s] ...
+	...
+
+That's it.
 
 
 
@@ -180,7 +321,7 @@ Affected files and git-config params
 ------------------------------------
 
 All files are using git configuration formats - either gitconfig or
-gitattributes, more info on which can be found in git-config(1).
+gitattributes, more info on which can be found in `git-config(1)`_.
 
 
 Files
@@ -196,21 +337,49 @@ Files
 git-config values
 `````````````````
 
-* nerps.n-e-r-p-s - placeholder key to work around `long-standing git-config bug
-  with empty sections`_.
+git splits these into sections in the config file, but flat key-value output can
+be produced by ``git config --list`` (add ``--file /path/to/config`` for any
+random config path).
 
-* nerps.version - integer version of configuration, for easy (and hands-off)
+* ``nerps.n-e-r-p-s`` - placeholder key to work around `long-standing git-config
+  bug with empty sections`_.
+
+* ``nerps.version`` - integer version of configuration, for easy (and hands-off)
   future migrations from older ones when config format changes.
 
-* nerps.key.X - individual crypto keys, where X is the key name.
+* ``nerps.key.X`` - individual crypto keys, where X is the key name.
 
-* nerps.key-default - default crypto key **name** (stored as value).
+* ``nerps.key-default`` - default crypto key **name** (stored as value).
 
-git splits these into sections inside the file, but flat key-value output can be
-produced by ``git config --list`` (add ``--file /path/to/config`` for any random
-config path).
+* ``filter.nerps.clean``
+
+  "nerps" filter driver command to "clean" files from local copy before
+  comitting them to repository, which in this case means "encrypt".
+
+  See `git-config(1)`_ and `gitattributes(5)`_ for more details on how these work.
+
+* ``filter.nerps.smudge``
+
+  Same as "filter.nerps.clean", but for decryption process when extracting file
+  from repository to a local copy.
+
+* ``diff.nerps.textconv``
+
+  Similar to "filter.nerps.smudge", to display "git diff" correctly for
+  plaintext instead of encryped blobs.
+
+  See `git-config(1)`_ and `gitattributes(5)`_ for details on
+  "diff.<driver>.textconv".
+
+* ``diff.nerps.cachetextconv``
+
+  Related to "diff.nerps.textconv" - enables caching of plaintext for diff
+  purposes, which should be fine, as it's only done locally.
 
 .. _long-standing git-config bug with empty sections: http://stackoverflow.com/questions/15935624/how-do-i-avoid-empty-sections-when-removing-a-setting-from-git-config
+.. _git-config(1): https://git-scm.com/docs/git-config
+.. _gitattributes(5): https://git-scm.com/docs/gitattributes
+
 
 
 
@@ -265,45 +434,12 @@ Links
 
 * `git-crypt project <https://www.agwa.name/projects/git-crypt/>`__
 
-  | Similar tool and a first thing I checked before writing this.
-  | Decided against using it for variety of reasons.
+  Similar tool and a first thing I checked before writing this, probably the
+  best one around.
 
-  Crypto used there is AES-CTR with OpenSSL, which is a huge red flag:
+  Crypto used there is AES-CTR with OpenSSL.
 
-  * Every other thing on top of OpenSSL uses it in a very wrong way.
-
-    `This HN comments thread <https://news.ycombinator.com/item?id=7556407>`__
-    actually has a comment from git-crypt author (agwa) on top, highlighting the issue:
-
-      I've done quite a bit of programming with the OpenSSL library and this
-      article is only scratching the surface of the awfulness. Documentation is
-      horrible to non-existent, you really do need to go spelunking into the
-      source to figure out how things work, and the code really is that
-      horrible.
-
-      The worst thing is that error reporting is not consistent - sometimes -1
-      means error, other times 0 means error, other times 0 means success, and
-      sometimes it's a combination. This is really, really bad for a crypto
-      library since properly detecting errors is usually critical to security.
-
-    See also "OpenSSL is written by monkeys (2009)" parent link there and all
-    related criticism and horrible bugs coming out of that crap.
-
-    Willingly using that in a new project given the alternatives (like NaCl)
-    seems just bizzare to me.
-
-  * Listing all the issues with internals of OpenSSL is a form of public
-    entertainment (see e.g. opensslrampage.org) - it'll always be hilariously
-    bad, despite being worked on more lately.
-
-  * Even without OpenSSL, using non-AEAD in 201x is just nonsense.
-
-  * Shows remarkable commitment from author to do things very wrong.
-
-  Doesn't offer proper tools for key and git configuration management that I
-  want to have, lots of C++ code, has to be built/packaged.
-
-  See also some blog posts and notes on its usage:
+  Some blog posts and notes on its usage:
 
   * `Git Crypted <https://flatlinesecurity.com/posts/git-crypted/>`__
 
@@ -318,6 +454,9 @@ Links
     These do have some useful info and feedback and comments from git-crypt
     author himself, incl. description of some of its internals.
 
+  Decided against using it for variety of reasons - OpenSSL, not AEAD, somewhat
+  different use-case and tools for that, C++.
+
 
 * `git-encrypt <https://github.com/shadowhand/git-encrypt>`__ ("gitcrypt" tool).
 
@@ -327,12 +466,12 @@ Links
 
     AES-ECB is plain insecure (and has been used as a "doing it wrong" example
     for decades!!!), and there's no conceivable reason to ever use it for new
-    projects except a total lack of knowledge in the area.
+    projects except a total lack of knowledge in the area, malice or maybe a joke.
 
   * ``openssl enc -base64 -$CIPHER -S "$SALT" -k "$PASS"``
 
     Yep, and every pid running in the same namespace (i.e. on the system), can
-    easily see this "$PASS" (i.e. run "ps" in a loop and you get it).
+    easily see this "$PASS" (e.g. run "ps" in a loop and you get it).
 
     See also comments on OpenSSL in git-crypt link above.
 
@@ -345,7 +484,7 @@ Links
 * `transcrypt <https://github.com/elasticdog/transcrypt>`__
 
   More competent "simple bash wrapper" implementation than git-encrypt above,
-  but lacking good configuration management cli, e.g.::
+  but lacking good configuration management cli IMO, e.g.::
 
     ### Designate a File to be Encrypted
 
@@ -365,7 +504,7 @@ Links
   caveats (mentioned in the readme there).
 
   Upside is that it doesn't require python or extra crytpo modules like PyNaCl -
-  bash and openssl are available anywhere.
+  bash and openssl are available everywhere.
 
 
 * `git-remote-gcrypt <https://github.com/bluss/git-remote-gcrypt>`__

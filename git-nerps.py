@@ -14,7 +14,7 @@ import hmac, hashlib
 class Conf(object):
 
 	key_name_pool = [ # NATO phonetic alphabet
-		'dash', 'alfa', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
+		'alfa', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
 		'hotel', 'india', 'juliett', 'kilo', 'lima', 'mike', 'november', 'oscar',
 		'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform', 'victor',
 		'whiskey', 'x-ray', 'yankee', 'zulu' ]
@@ -51,13 +51,11 @@ class NaCl(object):
 				for k in keys: setattr(self, k, getattr(mod, k))
 
 	def key_encode(self, key):
-		return key.encode(self.URLSafeBase64Encoder)
+		return key.encode(self.URLSafeBase64Encoder).strip()
 
-	def key_decode(self, key_str, name=None, t=None, raw=False):
+	def key_decode(self, key_str, t=None, raw=False):
 		enc = self.URLSafeBase64Encoder if not raw else self.RawEncoder
-		key = (t or self.SecretBox)(key_str, enc)
-		if name: key.name = name
-		return key
+		return (t or self.SecretBox)(key_str, enc)
 
 
 @contextmanager
@@ -246,8 +244,12 @@ class GitWrapper(object):
 		self.path_conf_init(gitconfig, chmod_dir=is_git_repo)
 		return gitconfig
 
-	def path_conf_init(self, gitconfig, chmod_umask=None, chmod_dir=False):
+	def path_conf_init(self, gitconfig=None, chmod_umask=None, chmod_dir=False):
 		assert not self.lock
+		if not gitconfig:
+			assert self.check()
+			gitconfig = self.c['path_conf'] = self.sub('config')
+			chmod_dir = True
 		self.init_lock(gitconfig)
 
 		run_conf = ft.partial(self.run_conf, gitconfig=gitconfig)
@@ -295,43 +297,52 @@ class GitWrapper(object):
 
 	def _key_iter(self):
 		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(self.param('key'))))
-		for line in self.run_conf(['--list']):
-			k, v = line.split('=', 1)
-			m = key_re.search(k)
-			if not m: continue
-			yield m.group(1), v.strip()
+		for gitconfig in self.sub('config'), self.path_conf_home:
+			for line in self.run_conf(['--list'], gitconfig):
+				k, v = line.split('=', 1)
+				m = key_re.search(k)
+				if not m: continue
+				yield gitconfig, m.group(1), v.strip()
 
 	@property
 	@cached_result
 	def key_name_default(self):
-		name = self.run_conf(['--get', self.param('key-default')], trap_code=1)
-		if name: name, = name
+		for gitconfig in self.sub('config'), self.path_conf_home:
+			name = self.run_conf(['--get', self.param('key-default')], gitconfig, trap_code=1)
+			if name:
+				name, = name
+				break
 		else: name = self.key_name_any
 		return name
 
 	@property
 	@cached_result
 	def key_name_any(self):
-		try: k, v = next(self._key_iter())
+		try: gitconfig, k, v = next(self._key_iter())
 		except StopIteration: return
 		return k
 
 	@property
 	@cached_result
 	def key_all(self):
-		return list(self.nacl.key_decode(key, name) for name, key in self._key_iter())
+		keys = list()
+		for gitconfig, name, key in self._key_iter():
+			key = self.nacl.key_decode(key)
+			key.gitconfig, key.name = gitconfig, name
+			keys.append(key)
+		return keys
 
 	def key(self, name=None):
 		name = name or self.key_name_default
 		if not name:
 			raise GitWrapperError('No keys found in config: {!r}'.format(self.path_conf))
-		key = self.run_conf(['--get', self.param('key', name)])
-		if not key:
+		for key in reversed(self.key_all):
+			if key.name == name: break
+		else:
 			raise GitWrapperError(( 'Key {!r} is set as default'
 				' but is unavailable (in config: {!r})' ).format(name, self.path_conf))
-		key, = key
 		self.log.debug('Using key: %s', name)
-		return self.nacl.key_decode(key, name)
+		return key
 
 
 
@@ -383,16 +394,24 @@ def run_command(opts, conf, nacl, git):
 	log = logging.getLogger(opts.cmd)
 	exit_code = 0
 
+
 	##########
-	if opts.cmd == 'key-gen':
+	if opts.cmd == 'init':
+		if not git.check(): opts.parser.error('Can only be run inside git repository')
+		git.path_conf_init()
+
+
+	##########
+	elif opts.cmd == 'key-gen':
 		key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
 		key = nacl.key_decode(key_raw, raw=True)
 		key_str = nacl.key_encode(key)
 
-		if opts.print or opts.verbose:
+		if opts.print:
 			print('Key:\n  ', key_str, '\n')
-			if opts.print: return
+			return
 
+		if opts.name_arg: opts.name = opts.name_arg
 		if opts.homedir:
 			git.force_conf_home = True
 		elif opts.git and not git.check():
@@ -412,6 +431,7 @@ def run_command(opts, conf, nacl, git):
 		k = git.param('key', name)
 
 		log.info('Adding key %r to gitconfig (k: %s): %r', name, k, gitconfig)
+		if opts.verbose: print('Generated new key {!r}:\n  {}\n'.format(name, key_str))
 
 		# To avoid flashing key on command line (which can be seen by any
 		#  user in same pid ns), "git config --add" is used with unique tmp_token
@@ -442,14 +462,13 @@ def run_command(opts, conf, nacl, git):
 	##########
 	elif opts.cmd == 'key-set':
 		if opts.name_arg: opts.name = opts.name_arg
-
 		if opts.homedir:
 			git.force_conf_home = True
 		elif opts.git and not git.check():
 			opts.parser.error('Not in a git repository and --git option was specified.')
 
 		k_dst = git.param('key-default')
-		k = git.run_conf(['--get', k_dst])
+		k = git.run_conf(['--get', k_dst], trap_code=1)
 
 		if k: # make sure default key is the right one and is available
 			k, = k
@@ -468,14 +487,25 @@ def run_command(opts, conf, nacl, git):
 
 
 	##########
+	elif opts.cmd == 'key-unset':
+		if opts.homedir:
+			git.force_conf_home = True
+		elif opts.git and not git.check():
+			opts.parser.error('Not in a git repository and --git option was specified.')
+		git.run_conf(['--unset-all', git.param('key-default')], trap_code=5)
+
+
+	##########
 	elif opts.cmd == 'key-list':
 		if opts.homedir:
 			git.force_conf_home = True
 		elif opts.git and not git.check():
 			opts.parser.error('Not in a git repository and --git option was specified.')
-		name_def = git.key_name_default
-		for key in git.key_all:
-			print('{}{}'.format(key.name, ' [default]' if key.name == name_def else ''))
+		key_names = map(op.attrgetter('name'), git.key_all)
+		for n_def, name in reversed(list(enumerate(key_names))):
+			if name == git.key_name_default: break
+		for n, name in enumerate(key_names):
+			print('{}{}'.format(name, ' [default]' if n == n_def else ''))
 
 
 	##########
@@ -610,7 +640,7 @@ def main(args=None, defaults=None):
 
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
 
-	parser.add_argument('-n', '--name',
+	parser.add_argument('-n', '--name', metavar='key-name',
 		help='Key name to use.'
 			' Can be important or required for some commands (e.g. "key-set").'
 			' For most commands, default key gets'
@@ -618,13 +648,19 @@ def main(args=None, defaults=None):
 			' When generating new key, default is to pick some'
 				' unused name from the phonetic alphabet letters.')
 
-	parser.add_argument('-s', '--name-strict',
+	parser.add_argument('-s', '--name-strict', action='store_true',
 		help='Only try specified or default key for decryption.'
 			' Default it to try other ones if that one fails, to see if any of them work for a file.')
 
 	cmds = parser.add_subparsers(
 		dest='cmd', title='Actions',
 		description='Supported actions (have their own suboptions as well)')
+
+
+	cmd = 'Initialize repository configuration.'
+	cmd = cmds.add_parser('init', help=cmd, description=cmd,
+		epilog='Will be done automatically on any'
+			' other action (e.g. "key-gen"), so can usually be skipped.')
 
 
 	cmd = 'Generate new encryption key and store or just print it.'
@@ -636,6 +672,8 @@ def main(args=None, defaults=None):
 			' Use "key-set" command to pick default key for git repo, user or file.'
 			' System-wide and per-user gitconfig files are never used for key storage,'
 				' as these are considered to be a bad place to store anything private.')
+	cmd.add_argument('name_arg', nargs='?',
+		help='Same as using global --name option, but overrides it if both are used.')
 
 	cmd.add_argument('-p', '--print', action='store_true',
 		help='Only print the generated key, do not store anywhere.')
@@ -661,7 +699,14 @@ def main(args=None, defaults=None):
 				' or it no longer available, first (any) available key will be set as default.')
 	cmd.add_argument('name_arg', nargs='?',
 		help='Same as using global --name option, but overrides it if both are used.')
+	cmd.add_argument('-g', '--git', action='store_true',
+		help='Store new key in git-config, or exit with error if not in git repo.')
+	cmd.add_argument('-d', '--homedir', action='store_true',
+		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
 
+
+	cmd = 'Unset default encryption key for a repo/homedir config.'
+	cmd = cmds.add_parser('key-unset', help=cmd, description=cmd)
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
@@ -670,45 +715,22 @@ def main(args=None, defaults=None):
 
 	cmd = 'List available crypto keys.'
 	cmd = cmds.add_parser('key-list', help=cmd, description=cmd)
-
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
 		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
 
 
-	cmd = 'Encrypt file before comitting it into git repository - "clean" from secrets.'
-	cmd = cmds.add_parser('git-clean', help=cmd, description=cmd,
-		epilog='Intended to be only used by git, use "encrypt" command from terminal instead.')
-	cmd.add_argument('path', nargs='?',
-		help='Filename suppled by git.'
-			' Not used, since git supplies file contents'
-				' to stdin and expects processing results from stdout.')
-
-	cmd = 'Decrypt file when getting it from git repository - "smudge" it with secrets.'
-	cmd = cmds.add_parser('git-smudge', help=cmd, description=cmd,
-		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
-	cmd.add_argument('path', nargs='?',
-		help='Filename suppled by git.'
-			' Not used, since git supplies file contents'
-				' to stdin and expects processing results from stdout.')
-
-	cmd = 'Decrypt file when getting it from git repository for diff generation purposes.'
-	cmd = cmds.add_parser('git-diff', help=cmd, description=cmd,
-		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
-	cmd.add_argument('path', help='Filename suppled by git.')
-
-
 	cmd = 'Encrypt file in-place or process stdin to stdout.'
 	cmd = cmds.add_parser('encrypt', help=cmd, description=cmd)
-	cmd.add_argument('path', help='Path to a file to encrypt.'
+	cmd.add_argument('path', nargs='?', help='Path to a file to encrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
 	cmd.add_argument('-f', '--force', action='store_true',
 		help='Encrypt even if file appears to be encrypted already.')
 
 	cmd = 'Decrypt file in-place or process stdin to stdout.'
 	cmd = cmds.add_parser('decrypt', help=cmd, description=cmd)
-	cmd.add_argument('path', help='Path to a file to decrypt.'
+	cmd.add_argument('path', nargs='?', help='Path to a file to decrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
 	cmd.add_argument('-f', '--force', action='store_true',
 		help='Decrypt even if file does not appear to be encrypted.')
@@ -747,6 +769,28 @@ def main(args=None, defaults=None):
 	cmd.add_argument('-l', '--local-only', action='store_true',
 		help='Remove pattern from .git/info/attributes (which'
 			' does not usually get shared) instead of .gitattributes.')
+
+
+	cmd = 'Encrypt file before comitting it into git repository - "clean" from secrets.'
+	cmd = cmds.add_parser('git-clean', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "encrypt" command from terminal instead.')
+	cmd.add_argument('path', nargs='?',
+		help='Filename suppled by git.'
+			' Not used, since git supplies file contents'
+				' to stdin and expects processing results from stdout.')
+
+	cmd = 'Decrypt file when getting it from git repository - "smudge" it with secrets.'
+	cmd = cmds.add_parser('git-smudge', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
+	cmd.add_argument('path', nargs='?',
+		help='Filename suppled by git.'
+			' Not used, since git supplies file contents'
+				' to stdin and expects processing results from stdout.')
+
+	cmd = 'Decrypt file when getting it from git repository for diff generation purposes.'
+	cmd = cmds.add_parser('git-diff', help=cmd, description=cmd,
+		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
+	cmd.add_argument('path', help='Filename suppled by git.')
 
 
 	opts = parser.parse_args(args)
