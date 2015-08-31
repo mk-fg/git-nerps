@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from os.path import join, expanduser, realpath, dirname
 import os, sys, re, stat, logging
 import tempfile, fcntl, subprocess
+import hmac, hashlib
 
 
 class Conf(object):
@@ -24,9 +25,10 @@ class Conf(object):
 
 	def nonce_func(self, path, plaintext):
 		assert '\0' not in path, path
-		raw = 'nerps\0{}\0{}'.format(path, plaintext)
-		return nacl.sha256(raw, nacl.RawEncoder)
+		raw = hmac.new('nerps\0{}'.format(path), plaintext, hashlib.sha256).digest()
+		return raw[:self.nacl.SecretBox.NONCE_SIZE]
 
+	def __init__(self, nacl): self.nacl = nacl
 	def __repr__(self): return repr(vars(self))
 	def get(self, *k): return getattr(self, '_'.join(k))
 
@@ -89,6 +91,19 @@ def with_src_lock(shared=False):
 		return _wrapper
 	return _decorator
 
+def cached_result(key_or_func=None, _key=None):
+	if callable(key_or_func):
+		_key = _key or key_or_func.func_name
+		@ft.wraps(key_or_func)
+		def _wrapper(self, *args, **kws):
+			if _key not in self.c:
+				self.c[_key] = key_or_func(self, *args, **kws)
+			return self.c[_key]
+		return _wrapper
+	return ft.partial(cached_result, _key=key_or_func)
+
+
+class GitWrapperError(Exception): pass
 
 class GitWrapper(object):
 
@@ -121,18 +136,9 @@ class GitWrapper(object):
 			self.lock = None
 
 
-	def _cached_result(key):
-		def _decorator(func):
-			@ft.wraps(func)
-			def _wrapper(self, *args, **kws):
-				if key not in self.c:
-					self.c[key] = func(self, *args, **kws)
-				return self.c[key]
-			return _wrapper
-		return _decorator
 
 	@property
-	@_cached_result('dev-null')
+	@cached_result
 	def dev_null(self): return open(os.devnull, 'wb')
 
 	def run(self, args=None, check=False, no_stderr=False, trap_code=None):
@@ -172,12 +178,12 @@ class GitWrapper(object):
 		return 'nerps.{}'.format('.'.join(path))
 
 	@property
-	@_cached_result('git-conf-home')
+	@cached_result
 	def path_conf_home(self):
 		return expanduser(self.conf.git_conf_home)
 
 	@property
-	@_cached_result('git-conf')
+	@cached_result
 	def path_conf(self):
 		is_git_repo = self.check()
 		gitconfig = self.sub('config') if is_git_repo else self.path_conf_home
@@ -208,16 +214,48 @@ class GitWrapper(object):
 			os.chmod(git_repo_dir, os.stat(git_repo_dir).st_mode & chmod_umask)
 		os.chmod(gitconfig, os.stat(gitconfig).st_mode & chmod_umask)
 
-	# @property
-	# @_cached_result('key')
-	# def key(self):
-	# 	name = self.run_conf(['--get', self.param('key-default')])
-	# 	if name:
-	# 		name, = name
-	# 		self.run_conf(['--get', self.param('key', name)])
+
+	def _key_iter(self):
+		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(git.param('key'))))
+		for line in git.run_conf(['--list']):
+			k, v = line.split('=', 1)
+			m = key_re.search(k)
+			if not m: continue
+			yield m.group(1), v.strip()
+
+	@property
+	@cached_result
+	def key_name_default(self):
+		name = self.run_conf(['--get', self.param('key-default')])
+		name, = name or [None]
+		return name
+
+	@property
+	@cached_result
+	def key_name_any(self):
+		try: k, v = next(self._key_name_iter())
+		except StopIteration: return
+		return k
+
+	@property
+	@cached_result
+	def key_all(self):
+		return map(op.itemgetter(1), self._key_name_iter())
+
+	def key(self, name=None):
+		name = name or self.key_name_default or self.key_name_any
+		if not name:
+			raise GitWrapperError('No keys found in config: {!r}'.format(self.path_conf))
+		key = self.run_conf(['--get', self.param('key', name)])
+		if not key:
+			raise GitWrapperError(( 'Key {!r} is set as default'
+				' but is unavailable (in config: {!r})' ).format(name, self.path_conf))
+		key, = key
+		self.log.debug('Using key: %s', name)
+		return self.nacl.key_decode(key)
 
 
-def run_command(opts, git, nacl):
+def run_command(opts, conf, nacl, git):
 	log = logging.getLogger(opts.cmd)
 
 	##########
@@ -235,7 +273,7 @@ def run_command(opts, git, nacl):
 
 		name = opts.name
 		if not name:
-			for name in git.conf.key_name_pool:
+			for name in conf.key_name_pool:
 				k = git.param('key', name)
 				if not run_conf(['--get', k], check=True, no_stderr=True): break
 			else:
@@ -288,14 +326,7 @@ def run_command(opts, git, nacl):
 				opts.parser.error('Key %r was not found in config file: %r', k, git.path_conf)
 			k = None if not v else (k_updated or True) # True - already setup
 
-		if not k: # pick first random key
-			key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(git.param('key'))))
-			for line in git.run_conf(['--list']):
-				k, v = line.split('=', 1)
-				m = key_re.search(k)
-				if not m: continue
-				k = m.group(1)
-			else: k = None
+		if not k: k = git.key_name_any # pick first random key
 
 		if k and k is not True:
 			git.run_conf(['--unset-all', k_dst], trap_code=5)
@@ -303,23 +334,36 @@ def run_command(opts, git, nacl):
 
 
 	##########
-	elif opts.cmd == 'git-clean': pass
-		# key = git.key
-		# plaintext = sys.stdin.read()
-		# nonce = conf.nonce_func(opts.path, plaintext)
-		# ciphertext =
-
+	elif opts.cmd == 'git-clean':
+		key = git.key(opts.name)
+		plaintext = sys.stdin.read()
+		nonce = conf.nonce_func(opts.path, plaintext)
+		ciphertext = key.encrypt(plaintext, nonce)
+		sys.stdout.write('nerps {}\n\n'.format(conf.git_conf_version))
+		sys.stdout.write(ciphertext.encode('base64'))
+		sys.stdout.close() # to make sure no garbage data will end up there
 
 
 	##########
-	elif opts.cmd == 'git-smudge': pass
+	elif opts.cmd == 'git-smudge':
+		key = git.key(opts.name)
+		header = sys.stdin.readline()
+		nerps, ver = header.strip().split(None, 2)[:2]
+		assert nerps == 'nerps', nerps
+		assert int(ver) <= conf.git_conf_version, ver
+		ciphertext = sys.stdin.read().strip().decode('base64')
+		plaintext = key.decrypt(ciphertext)
+		# XXX: test other keys if this one fails
+		sys.stdout.write(plaintext)
+		sys.stdout.close() # to make sure no garbage data will end up there
 
 
 	else: opts.parser.error('Unrecognized command: {}'.format(opts.cmd))
 
 
 def main(args=None, defaults=None):
-	conf, nacl, args = defaults or Conf(), NaCl(), sys.argv[1:] if args is None else args
+	nacl, args = NaCl(), sys.argv[1:] if args is None else args
+	conf = defaults or Conf(nacl)
 
 	import argparse
 	parser = argparse.ArgumentParser(description='Tool to manage encrypted files in a git repo.')
@@ -399,7 +443,7 @@ def main(args=None, defaults=None):
 
 	with GitWrapper(conf, nacl) as git:
 		opts.parser = parser
-		return run_command(opts, git, nacl)
+		return run_command(opts, conf, nacl, git)
 
 
 if __name__ == '__main__': sys.exit(main())

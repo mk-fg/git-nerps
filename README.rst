@@ -206,6 +206,45 @@ config path).
 
 
 
+Encryption details
+------------------
+
+Encryption process in pseudocode::
+
+  file_path, file_plaintext = git_input_data
+  secretbox_key, version_ascii = git_config_data
+
+  nonce_32b = HMAC(
+    key = 'nerps\0' || file_path,
+    msg = file_plaintext,
+    digest = sha256 )
+
+  nonce = nonce_32b[:nacl.SecretBox.NONCE_SIZE]
+
+  ciphertext = crypto_secretbox(
+    key = secretbox_key,
+    msg = plaintext,
+    nonce = nonce )
+
+  ciphertext_base64 = base64_encode(ciphertext)
+
+  header = 'nerps ' || version_ascii
+
+  git_output_data = header || '\n\n' || ciphertext_base64
+
+Nonce here is derived from plaintext hash, which should exclude possibility of
+reuse for different plaintexts, yet provide deterministic output for the same
+file.
+
+Note that no key id is present in the output data, but since this is
+authenticated encryption, it is still possible to determine which key ciphertext
+should be decrypted with by just trying them all until authentication succeeds.
+
+"version_ascii" is just "1" or such, encoded in there in case encryption
+algorithm might change in the future.
+
+
+
 Links
 -----
 
