@@ -4,16 +4,23 @@ from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
 from contextlib import contextmanager
-from os.path import join, expanduser, realpath
+from os.path import join, expanduser, realpath, dirname
 import os, sys, re, stat, logging
 import tempfile, fcntl, subprocess
 
 
-default_key_names = [ # NATO phonetic alphabet
-	'dash', 'alfa', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
-	'hotel', 'india', 'juliett', 'kilo', 'lima', 'mike', 'november', 'oscar',
-	'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform', 'victor',
-	'whiskey', 'x-ray', 'yankee', 'zulu' ]
+class Conf(object):
+
+	key_name_pool = [ # NATO phonetic alphabet
+		'dash', 'alfa', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
+		'hotel', 'india', 'juliett', 'kilo', 'lima', 'mike', 'november', 'oscar',
+		'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform', 'victor',
+		'whiskey', 'x-ray', 'yankee', 'zulu' ]
+
+	umask = 0700 # for files where keys are stored
+
+	def __repr__(self): return repr(vars(self))
+	def get(self, *k): return getattr(self, '_'.join(k))
 
 
 class NaCl(object):
@@ -122,19 +129,18 @@ git_conf_home.base = '~/.git-nerps-keys'
 
 def git_conf():
 	if not hasattr(git_conf, 'cache'):
-		git_conf.cache = git_dir('config') if git_check() else git_conf_home()
-		git_conf_init(git_conf.cache)
+		is_git_repo = git_check()
+		git_conf.cache = git_dir('config') if is_git_repo else git_conf_home()
+		git_conf_init(git_conf.cache, chmod_dir=is_git_repo)
 	return git_conf.cache
 git_conf.version = 1
 
-def git_conf_init(gitconfig):
+def git_conf_init(gitconfig, chmod_umask=None, chmod_dir=False):
 	assert not hasattr(git_conf_init, 'lock')
 	conf_id = nacl.sha256(realpath(gitconfig), nacl.URLSafeBase64Encoder)[:8]
 	git_conf_init.lock = open(join(
 		tempfile.gettempdir(), '.git-nerps.{}.lock'.format(conf_id) ), 'ab+')
 	fcntl.lockf(git_conf_init.lock, fcntl.LOCK_EX)
-
-	# XXX: chmod here for git dir and files
 
 	git_conf_cmd = ['config', '--file', gitconfig]
 	ver_k = git_param('version')
@@ -150,8 +156,14 @@ def git_conf_init(gitconfig):
 		# Any future migrations go here
 		git(git_conf_cmd + ['--add', ver_k, bytes(git_conf.version)])
 
+	if chmod_umask is None: chmod_umask = conf.umask
+	if chmod_dir:
+		git_repo_dir = dirname(gitconfig)
+		os.chmod(git_repo_dir, os.stat(git_repo_dir).st_mode & chmod_umask)
+	os.chmod(gitconfig, os.stat(gitconfig).st_mode & chmod_umask)
 
-def main(args=None):
+
+def main(args=None, defaults=None):
 	import argparse
 	parser = argparse.ArgumentParser(description='Tool to manage encrypted files in a git repo.')
 
@@ -207,15 +219,14 @@ def main(args=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	global log
+	global log, nacl, conf
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
 	log = logging.getLogger()
+	nacl = NaCl()
+	conf = defaults or Conf()
 
 	# To avoid influence from any of the system-wide aliases
 	os.environ['GIT_CONFIG_NOSYSTEM'] = 'true'
-
-	global nacl
-	nacl = NaCl()
 
 
 	if opts.cmd == 'key-gen':
@@ -232,7 +243,7 @@ def main(args=None):
 
 		name = opts.name
 		if not name:
-			for name in default_key_names:
+			for name in conf.key_name_pool:
 				k = git_param('key', name)
 				if not git_check(git_conf_cmd + ['--get', k]): break
 			else:
