@@ -5,8 +5,8 @@ from __future__ import print_function
 import itertools as it, operator as op, functools as ft
 from contextlib import contextmanager
 from os.path import join, expanduser, realpath, dirname
-import os, sys, io, re, stat, logging
-import tempfile, fcntl, subprocess
+import os, sys, io, re, types, logging
+import stat, tempfile, fcntl, subprocess
 import hmac, hashlib
 
 
@@ -23,8 +23,10 @@ class Conf(object):
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
+	enc_watermark = '¯\_ʻnerpsʻ_/¯'
+
 	def nonce_func(self, plaintext):
-		raw = hmac.new('nerps', plaintext, hashlib.sha256).digest()
+		raw = hmac.new(self.enc_watermark, plaintext, hashlib.sha256).digest()
 		return raw[:self.nacl.SecretBox.NONCE_SIZE]
 
 	def __init__(self, nacl): self.nacl = nacl
@@ -69,14 +71,20 @@ def safe_replacement(path, mode=None):
 			yield tmp
 			if not tmp.closed: tmp.flush()
 			os.rename(tmp.name, path)
+		except CancelFileReplacement: pass
 		finally:
 			try: os.unlink(tmp.name)
 			except (OSError, IOError): pass
+
+class CancelFileReplacement(Exception): pass
+safe_replacement.cancel = CancelFileReplacement
 
 @contextmanager
 def edit(path):
 	with open(path, 'rb') as src, safe_replacement(path) as tmp:
 		yield src, tmp
+
+edit.cancel = CancelFileReplacement
 
 def with_src_lock(shared=False):
 	lock = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
@@ -257,22 +265,30 @@ class GitWrapper(object):
 
 
 
+def is_encrypted(conf, src_or_line, rewind=True):
+	if not isinstance(src_or_line, types.StringTypes):
+		pos = src_or_line.tell()
+		line = src_or_line.readline()
+		src_or_line.seek(pos)
+		src_or_line = line
+	nerps, ver = src_or_line.strip().split(None, 2)[:2]
+	return nerps == conf.enc_watermark
+
 def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	key = git.key(name)
 	plaintext = src.read()
 	nonce = conf.nonce_func(plaintext)
 	ciphertext = key.encrypt(plaintext, nonce)
 	dst_stream = io.BytesIO() if not dst else dst
-	dst_stream.write('nerps {}\n\n'.format(conf.git_conf_version))
+	dst_stream.write('{} {}\n\n'.format(conf.enc_watermark, conf.git_conf_version))
 	dst_stream.write(ciphertext.encode('base64'))
 	if not dst: return dst_stream.getvalue()
-
 
 def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 	key = git.key(name)
 	header = src.readline()
 	nerps, ver = header.strip().split(None, 2)[:2]
-	assert nerps == 'nerps', nerps
+	assert nerps == conf.enc_watermark, nerps
 	assert int(ver) <= conf.git_conf_version, ver
 	ciphertext = src.read().strip().decode('base64')
 	try: plaintext = key.decrypt(ciphertext)
@@ -387,6 +403,7 @@ def run_command(opts, conf, nacl, git):
 	elif opts.cmd == 'encrypt':
 		if opts.path:
 			with edit(opts.path) as (src, tmp):
+				if not opts.force and is_encrypted(conf, src): raise edit.cancel
 				encrypt(conf, nacl, git, log, opts.name, src=src, dst=tmp)
 		else: encrypt(conf, nacl, git, log, opts.name, src=sys.stdin, dst=sys.stdout)
 
@@ -394,6 +411,7 @@ def run_command(opts, conf, nacl, git):
 	elif opts.cmd == 'decrypt':
 		if opts.path:
 			with edit(opts.path) as (src, tmp):
+				if not opts.force and not is_encrypted(conf, src): raise edit.cancel
 				decrypt( conf, nacl, git, log, opts.name,
 					src=src, dst=tmp, strict=opts.name_strict )
 		else:
@@ -484,11 +502,15 @@ def main(args=None, defaults=None):
 	cmd = cmds.add_parser('encrypt', help=cmd, description=cmd)
 	cmd.add_argument('path', help='Path to a file to encrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
+	cmd.add_argument('-f', '--force',
+		help='Encrypt even if file appears to be encrypted already.')
 
 	cmd = 'Decrypt file in-place or process stdin to stdout.'
 	cmd = cmds.add_parser('decrypt', help=cmd, description=cmd)
 	cmd.add_argument('path', help='Path to a file to decrypt.'
 		' If not specified, stdin/stdout streams will be used instead.')
+	cmd.add_argument('-f', '--force',
+		help='Decrypt even if file does not appear to be encrypted.')
 
 
 	opts = parser.parse_args(args)

@@ -228,7 +228,7 @@ Encryption process in pseudocode::
 
   ciphertext_base64 = base64_encode(ciphertext)
 
-  header = 'nerps ' || version_ascii
+  header = '¯\_ʻnerpsʻ_/¯ ' || version_ascii
 
   git_output_data = header || '\n\n' || ciphertext_base64
 
