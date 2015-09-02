@@ -364,7 +364,7 @@ def ssh_key_hash(conf, nacl, path):
 		tmp.write(open(path).read())
 		tmp.flush()
 		with tempfile.TemporaryFile() as stderr:
-			cmd = ['ssh-keygen', '-p', '-P', '', '-f', tmp.name]
+			cmd = ['ssh-keygen', '-p', '-P', '', '-N', '', '-f', tmp.name]
 			p = subprocess.Popen( cmd, stdin=dev_null(),
 				stdout=subprocess.PIPE, stderr=stderr, close_fds=True )
 			stdout = p.stdout.read().splitlines()
@@ -384,10 +384,10 @@ def ssh_key_hash(conf, nacl, path):
 				print('WARNING:')
 				print( 'WARNING: !!! ssh key will be decrypted'
 					' (via ssh-keygen) to a temporary file {!r} in the next step !!!'.format(tmp.name) )
-				print('WARNING: DO NOT enter key passphrase and ABORT operation'
-					' (^C) if that is too risky, otherwise be sure to leave new passphrase empty.')
+				print('WARNING: DO NOT enter key passphrase'
+					' and ABORT operation (^C) if that is undesirable.')
 				print('WARNING:')
-				cmd = ['ssh-keygen', '-p', '-f', tmp.name]
+				cmd = ['ssh-keygen', '-p', '-N', '', '-f', tmp.name]
 				log.debug('Running interactive ssh-keygen to decrypt key: %s', ' '.join(cmd))
 				err, stdout = None, subprocess.check_output(cmd, close_fds=True)
 
