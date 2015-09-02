@@ -305,6 +305,7 @@ class GitWrapper(object):
 	def _key_iter(self):
 		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(self.param('key'))))
 		for gitconfig in self.sub('config'), self.path_conf_home:
+			if not exists(gitconfig): continue
 			for line in self.run_conf(['--list'], gitconfig):
 				k, v = line.split('=', 1)
 				m = key_re.search(k)
