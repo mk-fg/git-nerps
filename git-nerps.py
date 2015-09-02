@@ -525,6 +525,7 @@ def run_command(opts, conf, nacl, git):
 
 	##########
 	elif opts.cmd == 'key-gen':
+		key_ssh = False # checked to pick more suitable key name
 		if opts.from_ssh_key is False:
 			key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
 		else:
@@ -544,6 +545,7 @@ def run_command(opts, conf, nacl, git):
 			key_raw = ssh_key_hash(conf, nacl, key_path)
 		key = nacl.key_decode(key_raw, raw=True)
 		key_str = nacl.key_encode(key)
+		key_ssh = True
 
 		if opts.print:
 			print('Key:\n  ', key_str, '\n')
@@ -560,7 +562,9 @@ def run_command(opts, conf, nacl, git):
 
 		name = opts.name
 		if not name:
-			for name in conf.key_name_pool:
+			pool = conf.key_name_pool
+			if key_ssh: pool = it.chain(['ssh'], pool)
+			for name in pool:
 				k = git.param('key', name)
 				if not run_conf(['--get', k], check=True, no_stderr=True): break
 			else:
