@@ -5,7 +5,7 @@ from __future__ import print_function
 import itertools as it, operator as op, functools as ft
 from contextlib import contextmanager
 from os.path import ( join, expanduser, isdir, basename,
-	realpath, dirname, abspath, exists, samefile, normpath )
+	realpath, dirname, abspath, exists, samefile, normpath, relpath )
 import os, sys, io, re, types, logging
 import stat, tempfile, fcntl, subprocess
 import hmac, hashlib
@@ -110,16 +110,6 @@ def with_src_lock(shared=False):
 		return _wrapper
 	return _decorator
 
-def relpath(path, from_path):
-	path, from_path = it.imap(abspath, (path, from_path))
-	if isdir(from_path): from_path += os.sep
-	from_path = dirname(from_path)
-	path, from_path = it.imap(lambda x: x.split(os.sep), (path, from_path))
-	for i in xrange(min(len(from_path), len(path))):
-		if from_path[i] != path[i]: break
-		else: i +=1
-	return join(*([os.pardir] * (len(from_path)-i) + path[i:]))
-
 def path_escape(path):
 	assert path.strip() == path, repr(path) # trailing spaces should be escaped
 	for c in '#!':
@@ -129,14 +119,13 @@ def path_escape(path):
 def filter_git_patterns(src, tmp, path_rel, _ree=re.escape):
 	if not src: src = io.BytesIO()
 	for n, line in enumerate(iter(src.readline, ''), 1):
-		ls = line.strip()
+		ls, act = line.strip(), None
 		assert not ls.endswith('\\'), repr(line) # not handling these escapes
 		if ls and not ls.startswith('#'):
 			pat, filters = ls.split(None, 1)
 			pat_re = _ree(pat.lstrip('/')).replace(_ree('**'), r'(.+)').replace(_ree('*'), r'([^\/]+)')
 			if '/' in pat: pat_re = '^{}'.format(pat_re)
-			if re.search(pat_re, path_rel):
-				act = yield n, line, pat, filters
+			if re.search(pat_re, path_rel): act = yield n, line, pat, filters
 		if not act: tmp.write('{}\n'.format(line.rstrip()))
 		elif isinstance(act, bytes): tmp.write('{}\n'.format(act.rstrip()))
 		elif act is filter_git_patterns.remove: pass
