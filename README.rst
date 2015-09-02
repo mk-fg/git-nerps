@@ -174,6 +174,9 @@ command.
   easy to generate it again from the same ssh key, but be sure to keep ssh key
   safe, if that is the case!
 
+  Scripts like `ssh-keyparse`_ can help to reduce modern ssh keys (ed25519) to a
+  short password-like strings - similar to ones git-nerps uses - for an easy backup.
+
 
 * Mark new files to be encrypted.
 
@@ -560,6 +563,10 @@ Links
   There's plenty of "encrypt values in JSON" tools, not really related to git,
   but can be (and generally are) used for secrets in JSON configurations shared
   between different machines/containers.
+
+
+* `ssh-keyparse <https://github.com/mk-fg/fgtk/#ssh-keyparse>`_ script to
+  convert ed25519 ssh keys to short strings (with just 32 bytes in them).
 
 
 * `gitattributes(5) manpage <https://git-scm.com/docs/gitattributes>`__
