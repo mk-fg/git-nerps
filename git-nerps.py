@@ -93,7 +93,7 @@ edit.cancel = CancelFileReplacement
 
 def dev_null():
 	if not hasattr(dev_null, 'cache'):
-		dev_null.cache = open(os.devnull, 'wb')
+		dev_null.cache = open(os.devnull, 'wb+')
 	return dev_null.cache
 
 def with_src_lock(shared=False):
