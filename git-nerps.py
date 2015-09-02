@@ -25,10 +25,13 @@ class Conf(object):
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
-	enc_watermark = '¯\_ʻnerpsʻ_/¯'
+	enc_magic = '¯\_ʻnerpsʻ_/¯'
+	nonce_key = enc_magic
+	pbkdf2_salt = enc_magic
+	pbkdf2_rounds = int(5e5)
 
 	def nonce_func(self, plaintext):
-		raw = hmac.new(self.enc_watermark, plaintext, hashlib.sha256).digest()
+		raw = hmac.new(self.nonce_key, plaintext, hashlib.sha256).digest()
 		return raw[:self.nacl.SecretBox.NONCE_SIZE]
 
 	def __init__(self, nacl): self.nacl = nacl
@@ -87,6 +90,11 @@ def edit(path):
 			with open(path, 'rb') as src: yield src, tmp
 
 edit.cancel = CancelFileReplacement
+
+def dev_null():
+	if not hasattr(dev_null, 'cache'):
+		dev_null.cache = open(os.devnull, 'wb')
+	return dev_null.cache
 
 def with_src_lock(shared=False):
 	lock = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
@@ -181,8 +189,7 @@ class GitWrapper(object):
 
 
 	@property
-	@cached_result
-	def dev_null(self): return open(os.devnull, 'wb')
+	def dev_null(self): return dev_null()
 
 	run_error = subprocess.CalledProcessError
 
@@ -345,6 +352,120 @@ class GitWrapper(object):
 		return key
 
 
+class SSHKeyError(Exception): pass
+
+def ssh_key_hash(conf, nacl, path):
+	# See PROTOCOL.key and sshkey.c in openssh sources
+	import struct
+	log = logging.getLogger('ssh-key-hash')
+
+	with tempfile.NamedTemporaryFile(
+			delete=True, dir=dirname(path), prefix=basename(path)+'.' ) as tmp:
+		tmp.write(open(path).read())
+		tmp.flush()
+		with tempfile.TemporaryFile() as stderr:
+			cmd = ['ssh-keygen', '-p', '-P', '', '-f', tmp.name]
+			p = subprocess.Popen( cmd, stdin=dev_null(),
+				stdout=subprocess.PIPE, stderr=stderr, close_fds=True )
+			stdout = p.stdout.read().splitlines()
+			err = p.wait()
+			stderr.seek(0)
+			stderr = stderr.read().splitlines()
+
+		if err:
+			if stdout: sys.stderr.write('\n'.join(stdout + ['']))
+			key_enc = False
+			for line in stderr:
+				if re.search( r'^Failed to load key .*:'
+						r' incorrect passphrase supplied to decrypt private key$', line ):
+					key_enc = True
+				else: sys.stderr.write('{}\n'.format(line))
+			if key_enc:
+				print('WARNING:')
+				print( 'WARNING: !!! ssh key will be decrypted'
+					' (via ssh-keygen) to a temporary file {!r} in the next step !!!'.format(tmp.name) )
+				print('WARNING: DO NOT enter key passphrase and ABORT operation'
+					' (^C) if that is too risky, otherwise be sure to leave new passphrase empty.')
+				print('WARNING:')
+				cmd = ['ssh-keygen', '-p', '-f', tmp.name]
+				log.debug('Running interactive ssh-keygen to decrypt key: %s', ' '.join(cmd))
+				err, stdout = None, subprocess.check_output(cmd, close_fds=True)
+
+		if err or 'Your identification has been saved with the new passphrase.' not in stdout:
+			for lines in stdout, stderr: sys.stderr.write('\n'.join(lines + ['']))
+			raise SSHKeyError(( 'ssh-keygen failed to process key {!r},'
+				' see stderr output above for details, command: {}' ).format(path, ' '.join(cmd)))
+
+		tmp.seek(0)
+		lines, key, done = tmp.read().splitlines(), list(), False
+		for line in lines:
+			if line == '-----END OPENSSH PRIVATE KEY-----': done = True
+			if key and not done: key.append(line)
+			if line == '-----BEGIN OPENSSH PRIVATE KEY-----':
+				if done:
+					raise SSHKeyError( 'More than one private'
+						' key detected in file, aborting: {!r}'.format(path) )
+				assert not key
+				key.append('')
+		if not done: raise SSHKeyError('Incomplete or missing key in file: {!r}'.format(path))
+		key_str = ''.join(key).decode('base64')
+		key = io.BytesIO(key_str)
+
+		def key_read_str(src=None):
+			if src is None: src = key
+			n, = struct.unpack('>I', src.read(4))
+			return src.read(n)
+
+		def key_assert(chk, err, *fmt_args, **fmt_kws):
+			if fmt_args or fmt_kws: err = err.format(*fmt_args, **fmt_kws)
+			err += ' [key file: {!r}, decoded: {!r}]'.format(path, key_str)
+			if not chk: raise SSHKeyError(err)
+
+		def key_assert_read(field, val, fixed=False):
+			pos, chk = key.tell(), key.read(len(val)) if fixed else key_read_str()
+			key_assert( chk == val, 'Failed to match key field'
+				' {!r} (offset: {}) - expected {!r} got {!r}', field, pos, val, chk )
+
+		key_assert_read('AUTH_MAGIC', 'openssh-key-v1\0', True)
+		key_assert_read('ciphername', 'none')
+		key_assert_read('kdfname', 'none')
+		key_assert_read('kdfoptions', '')
+		(pubkey_count,), pubkeys = struct.unpack('>I', key.read(4)), list()
+		for n in xrange(pubkey_count):
+			line = key_read_str()
+			key_assert(line, 'Empty public key #{}', n)
+			line = io.BytesIO(line)
+			key_t = key_read_str(line)
+			key_assert(key_t == 'ssh-ed25519', 'Unsupported pubkey type: {!r}', key_t)
+			ed2519_pk = key_read_str(line)
+			line = line.read()
+			key_assert(not line, 'Garbage data after pubkey: {!r}', line)
+			pubkeys.append(ed2519_pk)
+		privkey = io.BytesIO(key_read_str())
+		pos, tail = key.tell(), key.read()
+		key_assert( not tail,
+			'Garbage data after private key (offset: {}): {!r}', pos, tail )
+
+		key = privkey
+		n1, n2 = struct.unpack('>II', key.read(8))
+		key_assert(n1 == n2, 'checkint values mismatch in private key spec: {!r} != {!r}', n1, n2)
+		key_t = key_read_str()
+		key_assert(key_t == 'ssh-ed25519', 'Unsupported key type: {!r}', key_t)
+		ed2519_pk = key_read_str()
+		key_assert(ed2519_pk in pubkeys, 'Pubkey mismatch - {!r} not in {}', ed2519_pk, pubkeys)
+		ed2519_sk = key_read_str()
+		key_assert(
+			len(ed2519_pk) == 32 and len(ed2519_sk) == 64,
+			'Key length mismatch: {}/{} != 32/64', len(ed2519_pk), len(ed2519_sk) )
+		comment = key_read_str()
+		padding = key.read()
+		padding, padding_chk = list(bytearray(padding)), range(1, len(padding) + 1)
+		key_assert(padding == padding_chk, 'Invalid padding: {} != {}', padding, padding_chk)
+		log.debug('Parsed %s key, comment: %r', key_t, comment)
+
+	return hashlib.pbkdf2_hmac( 'sha256', ed2519_sk,
+		conf.pbkdf2_salt, conf.pbkdf2_rounds, nacl.SecretBox.KEY_SIZE )
+
 
 def is_encrypted(conf, src_or_line, rewind=True):
 	if not isinstance(src_or_line, types.StringTypes):
@@ -353,7 +474,7 @@ def is_encrypted(conf, src_or_line, rewind=True):
 		src_or_line.seek(pos)
 		src_or_line = line
 	nerps = src_or_line.strip().split(None, 1)
-	return nerps and nerps[0] == conf.enc_watermark
+	return nerps and nerps[0] == conf.enc_magic
 
 def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	key = git.key(name)
@@ -361,7 +482,7 @@ def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	nonce = conf.nonce_func(plaintext)
 	ciphertext = key.encrypt(plaintext, nonce)
 	dst_stream = io.BytesIO() if not dst else dst
-	dst_stream.write('{} {}\n'.format(conf.enc_watermark, conf.git_conf_version))
+	dst_stream.write('{} {}\n'.format(conf.enc_magic, conf.git_conf_version))
 	dst_stream.write(ciphertext)
 	if not dst: return dst_stream.getvalue()
 
@@ -369,7 +490,7 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 	key = git.key(name)
 	header = src.readline()
 	nerps, ver = header.strip().split(None, 2)[:2]
-	assert nerps == conf.enc_watermark, nerps
+	assert nerps == conf.enc_magic, nerps
 	assert int(ver) <= conf.git_conf_version, ver
 	ciphertext = src.read()
 	try: plaintext = key.decrypt(ciphertext)
@@ -403,7 +524,23 @@ def run_command(opts, conf, nacl, git):
 
 	##########
 	elif opts.cmd == 'key-gen':
-		key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
+		if opts.from_ssh_key is False:
+			key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
+		else:
+			key_path = opts.from_ssh_key
+			if not key_path or key_path in ['ed25519']:
+				key_path = list(
+					expanduser('~/.ssh/id_{}'.format(p))
+					for p in ([key_path] if key_path else ['ed25519']) )
+				key_path = filter(exists, key_path)
+				if len(key_path) != 1:
+					opts.parser.error(( 'Key spec must match exactly'
+						' one key path, matched: {}' ).format(', '.join(key_path)))
+				key_path, = key_path
+			if opts.from_ssh_key_pbkdf2_params:
+				rounds, salt = opts.from_ssh_key_pbkdf2_params.split('/', 1)
+				conf.pbkdf2_rounds, conf.pbkdf2_salt = int(rounds), salt
+			key_raw = ssh_key_hash(conf, nacl, key_path)
 		key = nacl.key_decode(key_raw, raw=True)
 		key_str = nacl.key_encode(key)
 
@@ -684,6 +821,24 @@ def main(args=None, defaults=None):
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
 		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
+
+	cmd.add_argument('-k', '--from-ssh-key',
+		nargs='?', metavar='ed25519 | path', default=False,
+		help='Derive key from openssh private key'
+				' using PBKDF2-SHA256 with static salt (by default,'
+				' see --from-ssh-key-pbkdf2-params).'
+			' If key is encrypted, error will be raised'
+				' (use "ssh-keygen -p" to provide non-encrypted version).'
+			' Optional argument can specify type of the key'
+				' (only ed25519 is supported though)'
+				' to pick from default location (i.e. ~/.ssh/id_*) or path to the key.'
+			' If optional arg is not specified, any default key will be picked,'
+				' but only if there is exactly one, otherwise error will be raised.')
+	cmd.add_argument('--from-ssh-key-pbkdf2-params', metavar='rounds/salt',
+		help='Number of PBKDF2 rounds and salt to use for --from-ssh-key derivation.'
+			' It is probably a good idea to not use any valuable secret'
+				' as "salt", especially when specifying it on the command line.'
+			' Defaults are: {}/{}'.format(conf.pbkdf2_rounds, conf.pbkdf2_salt))
 
 	cmd.add_argument('-s', '--set-as-default', action='store_true',
 		help='Set generated key as default in whichever config it will be stored.')

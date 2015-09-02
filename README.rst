@@ -3,7 +3,7 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses PyNaCl_ encryption (`NaCl crypto_secretbox`_, see "Encryption details"
+Uses PyNaCl_ encryption (`NaCl crypto_secretbox`_, see "Crypto details"
 section below for more info), gitattributes and git-config for configuration
 storage, which is partly shared with git and can be edited/adjusted by hand as
 well.
@@ -155,9 +155,24 @@ command.
     delta
     homer [default]
 
-  TODO: key-gen from local ssh private key
+  If another often-used secret - ssh private key - is already present in user's
+  homedir, it might be a good idea to derive git key from that instead.
 
-  TODO: command to find all encrypted files and auto-setup attrs
+  Tool supports parsing such keys and deriving new ones from from them in a
+  secure and fully deterministic fashion (using PBKDF2, see "Crypto details"
+  section below) via --from-ssh-key option::
+
+    % git-nerps.py key-gen -v --from-ssh-key
+    Key:
+      6ykkvuyS7gX9FpxtjGkntJFlGvk_t4oGsIJAPsy_Hn4=
+
+  Option --from-ssh-key-pbkdf2-params can be used to tweak PBKDF2 parameters to
+  e.g. derive several different keys from signle ssh key.
+
+  That way, while generated key will be stored in the config, it doesn't really
+  have to be preserved (e.g. can be removed with the repo or container), as it's
+  easy to generate it again from the same ssh key, but be sure to keep ssh key
+  safe, if that is the case!
 
 
 * Mark new files to be encrypted.
@@ -203,6 +218,8 @@ command.
   TODO: change key used for tainted file(s).
 
 
+TODO: command to find all encrypted files and auto-setup attrs
+
 TODO: how to remove accidentally comitted secret from a repository history.
 
 .. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
@@ -223,11 +240,11 @@ PyNaCl can also be installed from PyPI via pip.
 
 Install git-nerps.py script to PATH and test if it works from there::
 
-	% install -m0755 git-nerps.py /usr/local/bin/git-nerps
+  % install -m0755 git-nerps.py /usr/local/bin/git-nerps
 
-	% git-nerps -h
-	usage: git-nerps [-h] [-d] [-n key-name] [-s] ...
-	...
+  % git-nerps -h
+  usage: git-nerps [-h] [-d] [-n key-name] [-s] ...
+  ...
 
 That's it.
 
@@ -383,48 +400,70 @@ random config path).
 
 
 
-Encryption details
-------------------
+Crypto details
+--------------
 
-Encryption process in pseudocode::
+* File contents encryption.
 
-  file_plaintext = git_input_data
-  secretbox_key, version_ascii = git_config_data
+  Encryption process in pseudocode::
 
-  nonce_32b = HMAC(
-    key = 'nerps',
-    msg = file_plaintext,
-    digest = sha256 )
+    file_plaintext = git_input_data
+    secretbox_key, version_ascii = git_config_data
 
-  nonce = nonce_32b[:nacl.SecretBox.NONCE_SIZE]
+    nonce_32b = HMAC(
+      key = 'nerps',
+      msg = file_plaintext,
+      digest = sha256 )
 
-  ciphertext = crypto_secretbox(
-    key = secretbox_key,
-    msg = plaintext,
-    nonce = nonce )
+    nonce = nonce_32b[:nacl.SecretBox.NONCE_SIZE]
 
-  header = '¯\_ʻnerpsʻ_/¯ ' || version_ascii
+    ciphertext = crypto_secretbox(
+      key = secretbox_key,
+      msg = plaintext,
+      nonce = nonce )
 
-  git_output_data = header || '\n' || ciphertext
+    magic = '¯\_ʻnerpsʻ_/¯'
+    header = magic || ' ' || version_ascii
 
-"crypto_secretbox()" corresponds to `NaCl crypto_secretbox`_ routine (with
-PyNaCl wrapper), which is a combination of Salsa20 stream cipher and and
-Poly1305 authenticatior in one easy-to-use and secure package, implemented and
-maintained by very smart and skilled people (djb being the main author).
+    git_output_data = header || '\n' || ciphertext
 
-Nonce here is derived from plaintext hash, which should exclude possibility of
-reuse for different plaintexts, yet provide deterministic output for the same
-file.
+  "crypto_secretbox()" corresponds to `NaCl crypto_secretbox`_ routine (with
+  PyNaCl wrapper), which is a combination of Salsa20 stream cipher and and
+  Poly1305 authenticatior in one easy-to-use and secure package, implemented and
+  maintained by very smart and skilled people (djb being the main author).
 
-Note that key-id is not present in the output data, but since this is
-authenticated encryption, it's still possible to determine which key ciphertext
-should be decrypted with by just trying them all until authentication succeeds.
+  Nonce here is derived from plaintext hash, which should exclude possibility of
+  reuse for different plaintexts, yet provide deterministic output for the same
+  file.
 
-"version_ascii" is just "1" or such, encoded in there in case encryption
-algorithm might change in the future.
+  Note that key-id is not present in the output data, but since this is
+  authenticated encryption, it's still possible to determine which key ciphertext
+  should be decrypted with by just trying them all until authentication succeeds.
 
-Weird unicode stuff in the "header" is an arbitrary mark to be able to easily
-and kinda-reliably tell if file is encrypted by the presence of that watermark.
+  "version_ascii" is just "1" or such, encoded in there in case encryption
+  algorithm might change in the future.
+
+  Weird unicode stuff in the "header" is an arbitrary magic string to be able to
+  easily and kinda-reliably tell if file is encrypted by the presence of that.
+
+* Symmetric encryption key derivation from OpenSSH key.
+
+  OpenSSH key gets parsed according to openssh format described in PROTOCOL.key,
+  decrypting it beforehand by running "ssh-keygen -p" to a temporary file (with
+  a big warning when that happens, in case it's undesirable), if necessary.
+
+  Once raw private key is extracted, it gets processed in the following fashion::
+
+    pbkdf2(sha256, raw_private_key, '¯\_ʻnerpsʻ_/¯', 500_000, nacl.SecretBox.KEY_SIZE)
+
+  I.e. PBKDF2-SHA256 (as implemented in python's hashlib.pbkdf2_hmac) is used
+  with static salt (can be overidden via cli optioon) and 500k rounds (also
+  controllable via cli option), result is truncated to crypto_secretbox key
+  size.
+
+  Currently only ed25519 keys are supported, but that's mostly because I don't
+  see much reason to even allow other (mostly broken) types of keys, "BEGIN
+  OPENSSH PRIVATE KEY" format should be roughly same for all types of keys.
 
 
 
