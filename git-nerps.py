@@ -531,10 +531,9 @@ def run_command(opts, conf, nacl, git):
 			if opts.from_ssh_key_pbkdf2_params:
 				rounds, salt = opts.from_ssh_key_pbkdf2_params.split('/', 1)
 				conf.pbkdf2_rounds, conf.pbkdf2_salt = int(rounds), salt
-			key_raw = ssh_key_hash(conf, nacl, key_path)
+			key_ssh, key_raw = True, ssh_key_hash(conf, nacl, key_path)
 		key = nacl.key_decode(key_raw, raw=True)
 		key_str = nacl.key_encode(key)
-		key_ssh = True
 
 		if opts.print:
 			print('Key:\n  ', key_str, '\n')
