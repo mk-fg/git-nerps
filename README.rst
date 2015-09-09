@@ -223,7 +223,36 @@ command.
 
 TODO: command to find all encrypted files and auto-setup attrs
 
-TODO: how to remove accidentally comitted secret from a repository history.
+
+* Wipe accidentally-comitted secret from git repo history and related git blobs
+  on disk.
+
+  Just ``git rm`` on the file obviously won't get it done, as previous commits
+  will still have the file.
+
+  Rebasing can wipe it from those, but one'd still be able to recover old tree
+  via git-reflog, so that has to be cleaned-up as well.
+
+  So steps that I think are necessary for a local repository::
+
+    % git filter-branch --index-filter \
+      "git rm -rf --cached --ignore-unmatch $files" HEAD
+
+    % rm -rf .git/refs/original/
+    % git reflog expire --expire-unreachable=now --all
+    % git gc --aggressive --prune=now
+
+  Pushing result to a *bare* remote repo (no local copy, as e.g. gitolite
+  creates these) should get rid of the file(s) there as well (or maybe with an
+  extra "git gc" command), as those don't keep reflog history by default.
+
+  If it is really sensitive data though, I'd suggest exporting *new* git history
+  (e.g. via "git fast-export"), making sure data is not there (simple grep
+  should do it), and re-initializing both local and remote repos from that.
+
+  This should ensure that you have no other data in the new ".git" dir but
+  what's in that fast-export dump without relying on git internals like reflog
+  and gc behavior (which commands above do).
 
 .. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
 
@@ -514,8 +543,6 @@ Links
 
     Yep, and every pid running in the same namespace (i.e. on the system), can
     easily see this "$PASS" (e.g. run "ps" in a loop and you get it).
-
-    See also comments on OpenSSL in git-crypt link above.
 
   Just these two are enough to know where this project stands, but it also has
   lacking and unusable trying-to-be-interactive interface and lot of other issues.
