@@ -56,205 +56,210 @@ options, and e.g. ``git-nerps key-gen --help`` for args/opts to any particular
 command.
 
 
-* Initialize repository configuration.
+Initialize repository configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-  Same as with most commands below, only makes sense to run in a git repository.
+Same as with most commands below, only makes sense to run in a git repository.
 
-  ::
+::
 
-    % git-nerps init
-
-
-  This is done automatically on any meaningful action (e.g. "key-gen"), so can
-  usually be skipped.
-
-  Repository config ".git/config" should have these additional sections after
-  that::
-
-    [filter "nerps"]
-      clean = ~/.git-nerps git-clean
-      smudge = ~/.git-nerps git-smudge
-    [diff "nerps"]
-      textconv = ~/.git-nerps git-diff
-      cachetextconv = true
-    [nerps]
-      n-e-r-p-s = NERPS
-      version = 1
-
-  Any of these can be added and tweaked manually, see "git-config values"
-  section below for details on each parameter.
+  % git-nerps init
 
 
-* Generate encryption keys.
+This is done automatically on any meaningful action (e.g. "key-gen"), so can
+usually be skipped.
 
-  ::
+Repository config ".git/config" should have these additional sections after
+that::
 
-    % git-nerps key-gen
+  [filter "nerps"]
+    clean = ~/.git-nerps git-clean
+    smudge = ~/.git-nerps git-smudge
+  [diff "nerps"]
+    textconv = ~/.git-nerps git-diff
+    cachetextconv = true
+  [nerps]
+    n-e-r-p-s = NERPS
+    version = 1
 
-    % tail -2 .git/config
-    [nerps "key"]
-      alfa = d2rmvoMBcPAcs-otYtbRH_WIIztXtg7ONcbGgzwcpQo=
-
-  Generated key with auto-picked name "alfa" was stored in ".git/config", as
-  demonstrated above.
-
-  It will be used by default if it's the only key available.
-
-  With >1 keys, "key-set" command can be used to pick which one to use for new
-  files (and "key-unset" to reset that selection), otherwise first key found in
-  the config is used.
-
-  Decryption uses all available keys by default.
-
-  Key names get picked from `phonetic alphabet`_, if not specified explicity -
-  i.e. alfa, bravo, charlie, etc - a set of words designed to be fairly
-  distinctive.
-
-  Keys can also be stored in user's home directory (and selected via "key-set"
-  with -d/--homedir option), and these will be available for all repositories,
-  but key explicitly set as "default" in the current repo will take priority.
-
-  Extended example (from a fresh repository)::
-
-    % git-nerps key-gen
-    % git-nerps key-gen
-
-    % git-nerps key-gen -v
-    Generated new key 'charlie':
-      SZi85A55-RWKNFvDqTsq0T_ArANBoZw8DKEojtrLA8o=
-
-    % git-nerps key-gen --homedir homer
-
-    % git-nerps key-list
-    alfa [default]
-    bravo
-    charlie
-    homer
-
-    % git-nerps key-set bravo
-    % git-nerps key-list
-    alfa
-    bravo [default]
-    charlie
-    homer
-
-    % git-nerps key-gen --set-as-default
-    % git-nerps key-list
-    alfa
-    bravo
-    charlie
-    delta [default]
-    homer
-
-    % git-nerps key-unset
-    % git-nerps key-set --homedir homer
-    % git-nerps key-list
-    alfa
-    bravo
-    charlie
-    delta
-    homer [default]
-
-  If another often-used secret - ssh private key - is already present in user's
-  homedir, it might be a good idea to derive git key from that instead.
-
-  Tool supports parsing such keys and deriving new ones from from them in a
-  secure and fully deterministic fashion (using PBKDF2, see "Crypto details"
-  section below) via --from-ssh-key option::
-
-    % git-nerps.py key-gen -v --from-ssh-key
-    Key:
-      6ykkvuyS7gX9FpxtjGkntJFlGvk_t4oGsIJAPsy_Hn4=
-
-  Option --from-ssh-key-pbkdf2-params can be used to tweak PBKDF2 parameters to
-  e.g. derive several different keys from signle ssh key.
-
-  That way, while generated key will be stored in the config, it doesn't really
-  have to be preserved (e.g. can be removed with the repo or container), as it's
-  easy to generate it again from the same ssh key, but be sure to keep ssh key
-  safe, if that is the case!
-
-  Scripts like `ssh-keyparse`_ can help to reduce modern ssh keys (ed25519) to a
-  short password-like strings - similar to ones git-nerps uses - for an easy backup.
+Any of these can be added and tweaked manually, see "git-config values"
+section below for details on each parameter.
 
 
-* Mark new files to be encrypted.
+Generate encryption keys
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-  ::
+::
 
-    % git ls-files
-    backup_script.sh
+  % git-nerps key-gen
 
-    % cp ~/rsync_auth.txt .
-    % git-nerps taint rsync_auth.txt
-    % git add rsync_auth.txt .gitattributes
-    % git commit -a -m 'Add rsync auth data'
+  % tail -2 .git/config
+  [nerps "key"]
+    alfa = d2rmvoMBcPAcs-otYtbRH_WIIztXtg7ONcbGgzwcpQo=
 
-    % git ls-files
-    .gitattributes
-    backup_script.sh
-    rsync_auth.txt
+Generated key with auto-picked name "alfa" was stored in ".git/config", as
+demonstrated above.
 
-  ``git-nerps taint`` will add ``/rsync_auth.txt filter=nerps diff=nerps`` line
-  to ".gitattributes" file (creating it, if necessary), so that contents of the
-  file in the repository will always be transparently encrypted.
+It will be used by default if it's the only key available.
 
-  This can be applied to files that are already in the repository, but that
-  command will NOT rebase whole commit history to wipe or encrypt that file
-  there - this can be done manually, but might be tricky (e.g. with many
-  branches).
+With >1 keys, "key-set" command can be used to pick which one to use for new
+files (and "key-unset" to reset that selection), otherwise first key found in
+the config is used.
 
-  ``git-nerps taint`` also has -l/--local-only option to use
-  ".git/info/attributes" (which is not shared between repo clones) instead to
-  the same effect.
+Decryption uses all available keys by default.
 
-  ``git-nerps clear`` removes "taint" from file(s), if it's ever necessary.
+Key names get picked from `phonetic alphabet`_, if not specified explicity -
+i.e. alfa, bravo, charlie, etc - a set of words designed to be fairly
+distinctive.
 
-  Both "taint" and "clear" commands operate on gitattributes lines with patterns
-  matching repo-relative path to specified file(s), making sure that there's
-  exactly one such match (see also --force and --silent options), so it's
-  perfectly fine to add any valid patterns there by hand, these commands should
-  pick these up.
+Keys can also be stored in user's home directory (and selected via "key-set"
+with -d/--homedir option), and these will be available for all repositories,
+but key explicitly set as "default" in the current repo will take priority.
 
-  TODO: taints for parts of a file(s).
+Extended example (from a fresh repository)::
 
-  TODO: change key used for tainted file(s).
+  % git-nerps key-gen
+  % git-nerps key-gen
 
+  % git-nerps key-gen -v
+  Generated new key 'charlie':
+    SZi85A55-RWKNFvDqTsq0T_ArANBoZw8DKEojtrLA8o=
+
+  % git-nerps key-gen --homedir homer
+
+  % git-nerps key-list
+  alfa [default]
+  bravo
+  charlie
+  homer
+
+  % git-nerps key-set bravo
+  % git-nerps key-list
+  alfa
+  bravo [default]
+  charlie
+  homer
+
+  % git-nerps key-gen --set-as-default
+  % git-nerps key-list
+  alfa
+  bravo
+  charlie
+  delta [default]
+  homer
+
+  % git-nerps key-unset
+  % git-nerps key-set --homedir homer
+  % git-nerps key-list
+  alfa
+  bravo
+  charlie
+  delta
+  homer [default]
+
+If another often-used secret - ssh private key - is already present in user's
+homedir, it might be a good idea to derive git key from that instead.
+
+Tool supports parsing such keys and deriving new ones from from them in a
+secure and fully deterministic fashion (using PBKDF2, see "Crypto details"
+section below) via --from-ssh-key option::
+
+  % git-nerps.py key-gen -v --from-ssh-key
+  Key:
+    6ykkvuyS7gX9FpxtjGkntJFlGvk_t4oGsIJAPsy_Hn4=
+
+Option --from-ssh-key-pbkdf2-params can be used to tweak PBKDF2 parameters to
+e.g. derive several different keys from signle ssh key.
+
+That way, while generated key will be stored in the config, it doesn't really
+have to be preserved (e.g. can be removed with the repo or container), as it's
+easy to generate it again from the same ssh key, but be sure to keep ssh key
+safe, if that is the case!
+
+Scripts like ssh-keyparse_ can help to reduce modern ssh keys (ed25519) to a
+short password-like strings - similar to ones git-nerps uses - for an easy
+backup.
+
+.. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
+
+
+Mark new files to be encrypted
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+  % git ls-files
+  backup_script.sh
+
+  % cp ~/rsync_auth.txt .
+  % git-nerps taint rsync_auth.txt
+  % git add rsync_auth.txt .gitattributes
+  % git commit -a -m 'Add rsync auth data'
+
+  % git ls-files
+  .gitattributes
+  backup_script.sh
+  rsync_auth.txt
+
+``git-nerps taint`` will add ``/rsync_auth.txt filter=nerps diff=nerps`` line
+to ".gitattributes" file (creating it, if necessary), so that contents of the
+file in the repository will always be transparently encrypted.
+
+This can be applied to files that are already in the repository, but that
+command will NOT rebase whole commit history to wipe or encrypt that file
+there - this can be done manually, but might be tricky (e.g. with many
+branches).
+
+``git-nerps taint`` also has -l/--local-only option to use
+".git/info/attributes" (which is not shared between repo clones) instead to
+the same effect.
+
+``git-nerps clear`` removes "taint" from file(s), if it's ever necessary.
+
+Both "taint" and "clear" commands operate on gitattributes lines with patterns
+matching repo-relative path to specified file(s), making sure that there's
+exactly one such match (see also --force and --silent options), so it's
+perfectly fine to add any valid patterns there by hand, these commands should
+pick these up.
+
+TODO: taints for parts of a file(s).
+
+TODO: change key used for tainted file(s).
 
 TODO: command to find all encrypted files and auto-setup attrs
 
 
-* Wipe accidentally-comitted secret from git repo history and related git blobs
-  on disk.
+Wipe accidentally-comitted secret from git repo
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-  Just ``git rm`` on the file obviously won't get it done, as previous commits
-  will still have the file.
+Just ``git rm`` on the file obviously won't get it done, as previous commits
+will still have the file.
 
-  Rebasing can wipe it from those, but one'd still be able to recover old tree
-  via git-reflog, so that has to be cleaned-up as well.
+Rebasing can wipe it from those, but one'd still be able to recover old tree via
+git-reflog, so that has to be cleaned-up as well, and then git's
+garbage-collection mechanism should be run to purge unlinked blobs.
 
-  So steps that I think are necessary for a local repository::
+Hence steps that I think are necessary for a **local** repository::
 
-    % git filter-branch --index-filter \
-      "git rm -rf --cached --ignore-unmatch $files" HEAD
+  % git filter-branch --index-filter \
+    "git rm -rf --cached --ignore-unmatch $files" HEAD
 
-    % rm -rf .git/refs/original/
-    % git reflog expire --expire-unreachable=now --all
-    % git gc --aggressive --prune=now
+  % rm -rf .git/refs/original/
+  % git reflog expire --expire-unreachable=now --all
+  % git gc --aggressive --prune=now
 
-  Pushing result to a *bare* remote repo (no local copy, as e.g. gitolite
-  creates these) should get rid of the file(s) there as well (or maybe with an
-  extra "git gc" command), as those don't keep reflog history by default.
+Pushing rebase result (even without cleaning-up local ".git" dir) to a *bare*
+remote repo (no local copy, as e.g. gitolite creates these) should get rid of
+the file(s) there as well (or maybe with an extra "git gc" command), as those
+don't keep reflog history by default.
 
-  If it is really sensitive data though, I'd suggest exporting *new* git history
-  (e.g. via "git fast-export"), making sure data is not there (simple grep
-  should do it), and re-initializing both local and remote repos from that.
+If it is really sensitive data though, I'd suggest exporting *new* git history
+(e.g. via "git fast-export"), making sure data is not there (simple grep
+should do it), and re-initializing both local and remote repos from that.
 
-  This should ensure that you have no other data in the new ".git" dir but
-  what's in that fast-export dump without relying on git internals like reflog
-  and gc behavior (which commands above do).
-
-.. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
+This should ensure that you have no other data in the new ".git" dir but what's
+in that fast-export dump, without relying on git internals like reflog and gc
+behavior (which commands above do), which can and do change over time.
 
 
 
@@ -374,7 +379,7 @@ gitattributes, more info on which can be found in `git-config(1)`_.
 
 
 Files
-`````
+^^^^^
 
 * .git/config, $GIT_CONFIG or whatever git-config(1) detects.
 
@@ -384,7 +389,7 @@ Files
 
 
 git-config values
-`````````````````
+^^^^^^^^^^^^^^^^^
 
 git splits these into sections in the config file, but flat key-value output can
 be produced by ``git config --list`` (add ``--file /path/to/config`` for any
@@ -480,13 +485,21 @@ Crypto details
 
 * Symmetric encryption key derivation from OpenSSH key.
 
-  OpenSSH key gets parsed according to openssh format described in PROTOCOL.key,
-  decrypting it beforehand by running "ssh-keygen -p" to a temporary file (with
-  a big warning when that happens, in case it's undesirable), if necessary.
+  Only used when running ``key-gen --from-ssh-key`` subcommand.
+
+  OpenSSH key gets parsed according to openssh format described in PROTOCOL.key
+  file (in OpenSSH repo), decrypting it beforehand by running "ssh-keygen -p" to
+  a temporary file (with a big warning when that happens, in case it's undesirable),
+  if necessary.
 
   Once raw private key is extracted, it gets processed in the following fashion::
 
-    pbkdf2(sha256, raw_private_key, '¯\_ʻnerpsʻ_/¯', 500_000, nacl.SecretBox.KEY_SIZE)
+    pbkdf2(
+      pseudo_random_func = sha256,
+      password = raw_private_key,
+      salt = '¯\_ʻnerpsʻ_/¯',
+      iterations = 500_000,
+      derived_key_len = nacl.SecretBox.KEY_SIZE )
 
   I.e. PBKDF2-SHA256 (as implemented in python's hashlib.pbkdf2_hmac) is used
   with static salt (can be overidden via cli optioon) and 500k rounds (also
@@ -494,7 +507,7 @@ Crypto details
   size.
 
   Currently only ed25519 keys are supported, but that's mostly because I don't
-  see much reason to even allow other (mostly broken) types of keys, "BEGIN
+  see much reason to even allow other (mostly broken) types of keys - "BEGIN
   OPENSSH PRIVATE KEY" format should be roughly same for all types of keys.
 
 
