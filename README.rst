@@ -248,6 +248,10 @@ Hence steps that I think are necessary for a **local** repository::
   % git filter-branch --index-filter \
     "git rm -rf --cached --ignore-unmatch $files" HEAD
 
+  % git filter-branch --index-filter \
+    "git rm -rf --cached --ignore-unmatch $files" some-other-branch
+  ...
+
   % rm -rf .git/refs/original/
   % git reflog expire --expire-unreachable=now --all
   % git gc --aggressive --prune=now
@@ -257,13 +261,21 @@ remote repo (no local copy, as e.g. gitolite creates these) should get rid of
 the file(s) there as well (or maybe with an extra "git gc" command), as those
 don't keep reflog history by default.
 
+Note that all combinations of branches and files should be processed by ``git
+filter-branch`` above, including any branches that are currently present on
+remotes only (i.e. pull/filter/push all these as well)!
+
 If it is really sensitive data though, I'd suggest exporting *new* git history
 (e.g. via "git fast-export"), making sure data is not there (simple grep
 should do it), and re-initializing both local and remote repos from that.
 
-This should ensure that you have no other data in the new ".git" dir but what's
+This should ensure that there's no other data in the new ".git" dir but what's
 in that fast-export dump, without relying on git internals like reflog and gc
 behavior (which commands above do), which can and do change over time.
+
+It might also be necessary to find all cloned copies and purging those, so that
+".git" there is clean and there's no chance that branch with secrets will be
+pushed back to remote from there.
 
 
 Encrypt/decrypt local file
