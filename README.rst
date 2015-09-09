@@ -222,6 +222,10 @@ exactly one such match (see also --force and --silent options), so it's
 perfectly fine to add any valid patterns there by hand, these commands should
 pick these up.
 
+Note that neither "taint" nor "clear" do not touch contents of the actual file's
+in the local copy (i.e. on fs) at all - only set git attributes for future git
+commits.
+
 TODO: taints for parts of a file(s).
 
 TODO: change key used for tainted file(s).
@@ -260,6 +264,46 @@ should do it), and re-initializing both local and remote repos from that.
 This should ensure that you have no other data in the new ".git" dir but what's
 in that fast-export dump, without relying on git internals like reflog and gc
 behavior (which commands above do), which can and do change over time.
+
+
+Encrypt/decrypt local file
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Note that this is the opposite of what "taint" does, where actual local file is
+never touched, and it's only blobs in ".git" that get encrypted.
+
+So doesn't need to be run manually along with "taint" or anything like that,
+just an extra for encrypting non-git stuff with the same key for whatever other
+purposes.
+
+This tool is only designed to operate on really small files (up to a megabyte or
+a few), use gpg (and with assymetric keys) on any larger files.
+
+::
+
+  % echo password >secret.conf
+  % git-nerps encrypt secret.conf
+  % grep password secret.conf # encrypted file - no results
+
+  % git-nerps encrypt secret.conf
+  % git-nerps encrypt secret.conf # safe* to run multiple times
+
+  % git-nerps decrypt secret.conf
+  % cat secret.conf
+  password
+
+  % git-nerps decrypt secret.conf
+  % git-nerps decrypt secret.conf # safe* to run on plaintext
+  % cat secret.conf
+  password
+
+One caveat here that also makes it "safe" to run encrypt/decrypt multiple times
+is that both operations check "magic" at the start of a file and run/abort
+depending on presence of those bytes.
+
+This means that if file already has these weird bytes at the start (e.g. as a
+result of some malicious tampering), "encrypt" won't do anything to it - see
+"Crypto details" section below for more info.
 
 
 
@@ -502,7 +546,7 @@ Crypto details
       derived_key_len = nacl.SecretBox.KEY_SIZE )
 
   I.e. PBKDF2-SHA256 (as implemented in python's hashlib.pbkdf2_hmac) is used
-  with static salt (can be overidden via cli optioon) and 500k rounds (also
+  with static salt (can be overidden via cli option) and 500k rounds (also
   controllable via cli option), result is truncated to crypto_secretbox key
   size.
 
