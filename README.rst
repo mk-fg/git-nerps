@@ -226,12 +226,6 @@ Note that neither "taint" nor "clear" do not touch contents of the actual file's
 in the local copy (i.e. on fs) at all - only set git attributes for future git
 commits.
 
-TODO: taints for parts of a file(s).
-
-TODO: change key used for tainted file(s).
-
-TODO: command to find all encrypted files and auto-setup attrs
-
 
 Wipe accidentally-comitted secret from git repo
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -669,3 +663,17 @@ Links
 
 
 * `Some other git filters that I use <https://github.com/mk-fg/fgtk/#dev>`__
+
+
+
+TODO
+----
+
+* Taints for parts of file(s).
+
+* Change key used for tainted file(s).
+
+  Just re-comitting these should be enough, as old contents will be decrypted
+  with the old key and new ones encrypted with new one.
+
+* Command to find all encrypted files in local copy and auto-setup attrs.
