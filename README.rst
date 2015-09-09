@@ -313,6 +313,55 @@ result of some malicious tampering), "encrypt" won't do anything to it - see
 "Crypto details" section below for more info.
 
 
+Confirm that file was or will-be encrypted
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Git does not (and probably should not) track which filters are used in which
+commit, so only reliable way to tell if the file is encrypted in git-log or
+git-index is by its contents.
+
+Most obvious ways to do that are:
+
+* ``git show`` and ``--no-textconv`` option.
+
+  For file from an arbitrary commit (e.g. 7b53fd0) in git history::
+
+    % git show 7b53fd0:etc/cjdroute.conf
+    ¯\_ʻnerpsʻ_/¯ 1
+    ...binary data blob...
+
+  ``--no-textconv`` option can be added here, but should be default.
+
+  File added for commit in the working tree::
+
+    % git diff --no-textconv HEAD -- /etc/cjdroute.conf
+    diff --git a/etc/cjdroute.conf b/etc/cjdroute.conf
+    new file mode 100644
+    index 0000000..165fed5
+    Binary files /dev/null and b/etc/cjdroute.conf differ
+
+    % git show 165fed5
+    ¯\_ʻnerpsʻ_/¯ 1
+    ...binary data blob...
+
+  Use ``diff --staged`` to see only changes that were queued via git-add.
+
+  ``git log --no-textconf`` can also be used in a similar fashion.
+
+* ``git log --stat`` / ``git diff --stat``.
+
+  Encrypted files in ``--stat`` output show up as binary blobs, which can be
+  easy enough to spot for an otherwise text files, without inspecting stuff with
+  git-show.
+
+* ``git clone``.
+
+  git-clone can be used to get copy of a repo (e.g. ``git clone ~/path/to/myrepo
+  myrepo-copy``), as it is seen by someone without access to keys, where all
+  files should always be in their encrypted form.
+
+
+
 
 Installation
 ------------
@@ -415,6 +464,10 @@ Drawbacks, quirks and warnings
   Keep in mind that for any valuable secrets, it might be wise to keep roughly
   same level of replication as with ciphertext itself, i.e. keep N copies of
   keys for N copies of data, just maybe in different (more private) places.
+
+  This gets even more important consideration for git history - if any key will
+  be lost (or e.g. changed and old one discarded) in the future, everything
+  encrypted by it in the git-log will be lost forever.
 
 
 * Encryption keys are stored in "repo/.git/config" or "~/.git-nerps-keys".
@@ -524,7 +577,7 @@ Crypto details
 
     ciphertext = crypto_secretbox(
       key = secretbox_key,
-      msg = plaintext,
+      msg = file_plaintext,
       nonce = nonce )
 
     magic = '¯\_ʻnerpsʻ_/¯'
