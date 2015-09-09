@@ -836,8 +836,6 @@ def main(args=None, defaults=None):
 	cmd.add_argument('-s', '--set-as-default', action='store_true',
 		help='Set generated key as default in whichever config it will be stored.')
 
-	# XXX: option to generate from ssh private key
-
 
 	cmd = 'Set default encryption key for a repo/homedir config.'
 	cmd = cmds.add_parser('key-set', help=cmd, description=cmd,

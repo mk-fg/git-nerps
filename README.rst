@@ -283,7 +283,8 @@ just an extra for encrypting non-git stuff with the same key for whatever other
 purposes.
 
 This tool is only designed to operate on really small files (up to a megabyte or
-a few), use gpg (and with assymetric keys) on any larger files.
+a few), use gpg (and with assymetric keys) on any larger files, especially if
+you need good and proven security margin.
 
 ::
 
@@ -367,6 +368,23 @@ Drawbacks, quirks and warnings
 
   Plus I'm no security expert or cyptographer anyway, just a random coder, so
   maybe don't trust me much either.
+
+
+* When encrypted with the same key, two exact copies of the same file will
+  produce exactly same ciphertext.
+
+  This is intentional for a git filter, since mixing-in info from filename is
+  kinda tricky, as it's not always available and can lead to some weird bugs
+  (e.g. "git mv" producing broken files), and using entirely random nonce will
+  produce spurious changes in ciphertext with no changes in plaintext.
+
+  So if it is important to not leak info about two files being identical, only
+  way with this tool is to actually make them non-identical - even one-bit
+  difference (whitespace, padding, BOM, etc) should make them unrecognizable.
+
+  It's not the same case as with "salt" in passwords at all though - should
+  still be impossible to bruteforce these ciphertexts without bruteforcing whole
+  symmetric cipher key, at which point one can use it to just decrypt the file.
 
 
 * As noted in `this letter by Junio C Hamano`_, it is unwise to fully encrypt
