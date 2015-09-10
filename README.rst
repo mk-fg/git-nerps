@@ -360,6 +360,8 @@ Most obvious ways to do that are:
   myrepo-copy``), as it is seen by someone without access to keys, where all
   files should always be in their encrypted form.
 
+* There should probably a git-nerps subcommand to do it easier.
+
 
 
 
@@ -748,3 +750,5 @@ TODO
   with the old key and new ones encrypted with new one.
 
 * Command to find all encrypted files in local copy and auto-setup attrs.
+
+* Command to show if stuff is/was/will-be encrypted.
