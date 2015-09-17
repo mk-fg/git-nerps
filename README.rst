@@ -752,3 +752,6 @@ TODO
 * Command to find all encrypted files in local copy and auto-setup attrs.
 
 * Command to show if stuff is/was/will-be encrypted.
+
+* Address errors from e.g. git-show for commits in different-key branches, maybe
+  just make these look nicer.
