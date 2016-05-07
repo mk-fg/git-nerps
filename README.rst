@@ -349,7 +349,7 @@ Most obvious ways to do that are:
 
   Use ``diff --staged`` to see only changes that were queued via git-add.
 
-  ``git log --no-textconf`` can also be used in a similar fashion.
+  ``git log --no-textconv`` can also be used in a similar fashion.
 
 * ``git log --stat`` / ``git diff --stat``.
 
@@ -363,7 +363,7 @@ Most obvious ways to do that are:
   myrepo-copy``), as it is seen by someone without access to keys, where all
   files should always be in their encrypted form.
 
-* There should probably a git-nerps subcommand to do it easier.
+* There should probably be a git-nerps subcommand to make it easier.
 
 
 
