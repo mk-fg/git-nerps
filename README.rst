@@ -3,17 +3,20 @@ git-nerps
 
 Tool to encrypt and manage selected files (or parts of files) under git repository.
 
-Uses PyNaCl_ encryption (`NaCl crypto_secretbox`_, see "Crypto details"
-section below for more info), gitattributes and git-config for configuration
-storage, which is partly shared with git and can be edited/adjusted by hand as
-well.
+Uses libsodium_ (wrapped by libnacl_ / PyNaCl_) encryption (`NaCl
+crypto_secretbox`_, see "Crypto details" section below for more info),
+gitattributes and git-config for configuration storage, which is partly shared
+with git and can be edited/adjusted by hand as well.
 
 All the stuff is implemented as one python (python2!) script, which has
 different commands.  See --help output for a full list of these.
 
-.. _PyNaCl: http://pynacl.readthedocs.org/
+.. _libsodium: http://libsodium.org/
+.. _libnacl: http://libnacl.readthedocs.io/
+.. _PyNaCl: http://pynacl.readthedocs.io/
 .. _NaCl crypto_secretbox: http://nacl.cr.yp.to/secretbox.html
 
+|
 
 .. contents::
   :backlinks: none
@@ -372,10 +375,11 @@ Requirements:
 
 * Python 2.7 (NOT 3.X).
 
-* PyNaCl_ python module (has its own bundled NaCl lib copy).
+* PyNaCl_ or libnacl_ python module - either one will work, interoperable with
+  each other (and use same libsodium), no difference whatsoever.
 
 Both should be available in distro package repositories.
-PyNaCl can also be installed from PyPI via pip.
+PyNaCl/libnacl can also be installed from PyPI via pip.
 
 Install git-nerps.py script to PATH and test if it works from there::
 
@@ -575,7 +579,7 @@ Crypto details
       msg = file_plaintext,
       digest = sha256 )
 
-    nonce = nonce_32b[:nacl.SecretBox.NONCE_SIZE]
+    nonce = nonce_32b[:crypto_secretbox_NONCEBYTES]
 
     ciphertext = crypto_secretbox(
       key = secretbox_key,
@@ -588,9 +592,10 @@ Crypto details
     git_output_data = header || '\n' || ciphertext
 
   "crypto_secretbox()" corresponds to `NaCl crypto_secretbox`_ routine (with
-  PyNaCl wrapper), which is a combination of Salsa20 stream cipher and and
-  Poly1305 authenticatior in one easy-to-use and secure package, implemented and
-  maintained by very smart and skilled people (djb being the main author).
+  libsodium/PyNaCl/libnacl wrappers), which is a combination of Salsa20 stream
+  cipher and and Poly1305 authenticatior in one easy-to-use and secure package,
+  implemented and maintained by very smart and skilled people (djb being the
+  main author).
 
   Nonce here is derived from plaintext hash, which should exclude possibility of
   reuse for different plaintexts, yet provide deterministic output for the same
@@ -622,7 +627,7 @@ Crypto details
       password = raw_private_key,
       salt = '¯\_ʻnerpsʻ_/¯',
       iterations = 500_000,
-      derived_key_len = nacl.SecretBox.KEY_SIZE )
+      derived_key_len = crypto_secretbox_KEYBYTES )
 
   I.e. PBKDF2-SHA256 (as implemented in python's hashlib.pbkdf2_hmac) is used
   with static salt (can be overidden via cli option) and 500k rounds (also
@@ -708,8 +713,8 @@ Links
   crypto mostly right, despite all the openssl shortcomings and with some
   caveats (mentioned in the readme there).
 
-  Upside is that it doesn't require python or extra crytpo modules like PyNaCl -
-  bash and openssl are available everywhere.
+  Upside is that it doesn't require python or extra crytpo modules like
+  PyNaCl/libnacl - bash and openssl are available everywhere.
 
 
 * `git-remote-gcrypt <https://github.com/bluss/git-remote-gcrypt>`__

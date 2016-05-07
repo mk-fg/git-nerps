@@ -8,8 +8,12 @@ from os.path import ( join, expanduser, isdir, basename,
 	realpath, dirname, abspath, exists, samefile, normpath, relpath )
 import os, sys, io, re, types, logging
 import stat, tempfile, fcntl, subprocess
-import hmac, hashlib
+import hmac, hashlib, base64
 
+
+b64_encode = base64.urlsafe_b64encode
+b64_decode = lambda s:\
+	base64.urlsafe_b64decode(s) if '-' in s or '_' in s else s.decode('base64')
 
 class Conf(object):
 
@@ -32,7 +36,7 @@ class Conf(object):
 
 	def nonce_func(self, plaintext):
 		raw = hmac.new(self.nonce_key, plaintext, hashlib.sha256).digest()
-		return raw[:self.nacl.SecretBox.NONCE_SIZE]
+		return raw[:self.nacl.nonce_size]
 
 	def __init__(self, nacl): self.nacl = nacl
 	def __repr__(self): return repr(vars(self))
@@ -41,24 +45,54 @@ class Conf(object):
 
 class NaCl(object):
 
-	imports = dict(
-		exceptions=['CryptoError', 'BadSignatureError'],
-		encoding=['RawEncoder', 'URLSafeBase64Encoder'],
-		secret=['SecretBox'], hash=['sha256'], utils=['random'] )
+	nonce_size = key_size = key_encode = key_decode = random = error = None
 
 	def __init__(self):
-		import warnings, importlib
-		with warnings.catch_warnings(record=True): # cffi warnings
-			for mod, keys in self.imports.viewitems():
-				mod = importlib.import_module('nacl.{}'.format(mod))
-				for k in keys: setattr(self, k, getattr(mod, k))
+		libnacl = nacl = None
+		try: import libnacl
+		except ImportError:
+			try: import nacl
+			except ImportError:
+				raise ImportError( 'Either libnacl or pynacl module'
+					' is required for this tool, neither one can be imported.' )
 
-	def key_encode(self, key):
-		return key.encode(self.URLSafeBase64Encoder).strip()
+		if libnacl:
+			from libnacl.secret import SecretBox
+			self.nonce_size = libnacl.crypto_secretbox_NONCEBYTES
+			self.key_size = libnacl.crypto_secretbox_KEYBYTES
+			self.key_encode = lambda key: b64_encode(key.sk)
+			self.key_decode = lambda key_str, raw=False:\
+				SecretBox(key_str if raw else b64_decode(key_str))
+			self.random = libnacl.randombytes
+			self.error = ValueError
 
-	def key_decode(self, key_str, t=None, raw=False):
-		enc = self.URLSafeBase64Encoder if not raw else self.RawEncoder
-		return (t or self.SecretBox)(key_str, enc)
+		if nacl:
+			import warnings
+			with warnings.catch_warnings(record=True): # cffi warnings
+				from nacl.exceptions import CryptoError
+				from nacl.encoding import RawEncoder, URLSafeBase64Encoder
+				from nacl.secret import SecretBox
+				from nacl.utils import random
+			self.nonce_size = SecretBox.NONCE_SIZE
+			self.key_size = SecretBox.KEY_SIZE
+			self.key_encode = lambda key: key.encode(URLSafeBase64Encoder).strip()
+			self.key_decode = lambda key_str, raw=False:\
+				SecretBox(key_str, URLSafeBase64Encoder if not raw else RawEncoder)
+			self.random = random
+			self.error = CryptoError
+
+	def test( self, msg='test',
+			key_enc='pbb6wrDXlLWOFMXYH4a9YHh7nGGD1VnStVYQBe9MyVU=' ):
+		key = self.key_decode(self.random(self.key_size), raw=True)
+		assert key.decrypt(key.encrypt(msg, self.random(self.nonce_size)))
+		key = self.key_decode(key_enc)
+		assert self.key_encode(key) == key_enc
+		msg_enc = key.encrypt(msg, key_enc[:self.nonce_size])
+		msg_dec = key.decrypt(msg_enc)
+		assert msg_dec == msg
+		print(hashlib.sha256(''.join([
+			bytes(self.key_size), bytes(self.nonce_size),
+			self.key_encode(key), msg, msg_enc, msg_dec ])).hexdigest())
 
 
 @contextmanager
@@ -164,7 +198,7 @@ class GitWrapper(object):
 
 	def init_lock(self, gitconfig):
 		if self.lock: return
-		lock = self.nacl.sha256(realpath(gitconfig), self.nacl.URLSafeBase64Encoder)[:8]
+		lock = b64_encode(hashlib.sha256(realpath(gitconfig)).digest())[:8]
 		lock = join(tempfile.gettempdir(), '.git-nerps.{}.lock'.format(lock))
 		self.lock = open(lock, 'ab+')
 		self.log.debug('Acquiring lock: %r', lock)
@@ -454,7 +488,7 @@ def ssh_key_hash(conf, nacl, path):
 		log.debug('Parsed %s key, comment: %r', key_t, comment)
 
 	return hashlib.pbkdf2_hmac( 'sha256', ed2519_sk,
-		conf.pbkdf2_salt, conf.pbkdf2_rounds, nacl.SecretBox.KEY_SIZE )
+		conf.pbkdf2_salt, conf.pbkdf2_rounds, nacl.key_size )
 
 
 def is_encrypted(conf, src_or_line, rewind=True):
@@ -484,7 +518,7 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 	assert int(ver) <= conf.git_conf_version, ver
 	ciphertext = src.read()
 	try: plaintext = key.decrypt(ciphertext)
-	except nacl.CryptoError:
+	except nacl.error:
 		if strict: raise
 		err_t, err, err_tb = sys.exc_info()
 		log.debug( 'Failed to decrypt with %s key %r: %s',
@@ -493,7 +527,7 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 			if key_chk.name == key.name: continue
 			log.debug('Trying key: %s', key_chk.name)
 			try: plaintext = key_chk.decrypt(ciphertext)
-			except nacl.CryptoError: pass
+			except nacl.error: pass
 			else: break
 		else: raise err_t, err, err_tb
 	if dst: dst.write(plaintext)
@@ -516,7 +550,7 @@ def run_command(opts, conf, nacl, git):
 	elif opts.cmd == 'key-gen':
 		key_ssh = False # checked to pick more suitable key name
 		if opts.from_ssh_key is False:
-			key_raw = nacl.random(nacl.SecretBox.KEY_SIZE)
+			key_raw = nacl.random(nacl.key_size)
 		else:
 			key_path = opts.from_ssh_key
 			if not key_path or key_path in ['ed25519']:
