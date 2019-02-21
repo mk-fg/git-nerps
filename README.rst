@@ -28,7 +28,7 @@ See --help output for a full list of these.
 Idea
 ----
 
-Main purpose of such tool is to make it easy to store configuration that has
+Main purpose of the tool is to make it easy to store configuration that has
 some secrets in it within branches of a git repository.
 
 I.e. imagine a bunch of containers which share some/most configs and keep their
@@ -36,20 +36,23 @@ configuration in git branches.
 
 You'd like to easily pull, push, merge and cherry-pick between these
 repositories/branches, but each container has occasional bits that should not be
-shared.
+shared, e.g. passwords.txt file.
 
-One solution is to keep secret files out of repository or in a separate one,
-another is to just have these encrypted.
+One solution is to keep such secret files out of repository or in a separate one,
+another would be to transparently encrypt/decrypt these files in the repository.
+
 Such secrets can even be shared between containers that have access to same key,
-and not others.
+while remaining inaccessible without one.
 
-That way, only one short bit of data (key) has to be unique for a host, and
-presumably duplicated in some secure place, while the rest of the host's
-configuration can be shared, well-replicated and/or public.
+That way, only one short bit of data (key) has to be unique for a host,
+and presumably stored/backed-up in some trusted place(s) (e.g. dev machine),
+while the rest of the host configuration can be shared, well-replicated and/or public.
 
-Modifying .git/config and .gitattributes by hand gets old fast, plus one needs
-to store keys and have a dedicated tool/wrapper for git filters anyway, hence
-this project.
+Modifying .git/config and .gitattributes to facilitate that by hand gets old fast,
+plus one needs to store keys and have a dedicated tool/wrapper for git filters anyway.
+
+This tool can be used to do all that in a simple and relatively foolproof way.
+
 
 
 
@@ -60,7 +63,7 @@ See ``git nerps --help`` for full list of all supported commands and common
 options, and e.g. ``git nerps key-gen --help`` for args/opts to any particular
 command.
 
-"git-nerps" and "git nerps" commands be used interchangeably.
+"git-nerps" and "git nerps" commands be used interchangeably, when script is in $PATH.
 
 
 Initialize repository configuration
@@ -72,11 +75,10 @@ Same as with most commands below, only makes sense to run in a git repository.
 
   % git nerps init
 
-This is done automatically on any meaningful action (e.g. "key-gen"), so can
-usually be skipped.
+This is done automatically on any meaningful action (e.g. "key-gen"),
+so can usually be skipped.
 
-Repository config ".git/config" should have these additional sections after
-that::
+Repository config ".git/config" should have these additional sections after that::
 
   [filter "nerps"]
     clean = ~/.git-nerps git-clean
@@ -88,8 +90,8 @@ that::
     n-e-r-p-s = NERPS
     version = 1
 
-Any of these can be added and tweaked manually, see "git-config values"
-section below for details on each parameter.
+| Any of these can be added and tweaked manually.
+| See "git-config values" section below for details on each parameter.
 
 
 Generate encryption keys
@@ -114,9 +116,8 @@ the config is used.
 
 Decryption uses all available keys by default.
 
-Key names get picked from `phonetic alphabet`_, if not specified explicity -
-i.e. alfa, bravo, charlie, etc - a set of words designed to be fairly
-distinctive.
+Key names get auto-picked from `phonetic alphabet`_, if not specified explicity -
+i.e. alfa, bravo, charlie, etc - a set of words designed to be fairly distinctive.
 
 Keys can also be stored in user's home directory (and selected via "key-set"
 with -d/--homedir option), and these will be available for all repositories,
@@ -179,12 +180,11 @@ e.g. derive several different keys from signle ssh key.
 
 That way, while generated key will be stored in the config, it doesn't really
 have to be preserved (e.g. can be removed with the repo or container), as it's
-easy to generate it again from the same ssh key, but be sure to keep ssh key
-safe, if that is the case!
+easy to generate it again from the same ssh key (but be sure to keep ssh key
+safe, if that is the case!).
 
 Scripts like ssh-keyparse_ can help to reduce modern ssh keys (ed25519) to a
-short password-like strings - similar to ones git-nerps uses - for an easy
-backup.
+short password-like strings - similar to ones git-nerps uses - for an easy backup.
 
 .. _phonetic alphabet: https://en.wikipedia.org/wiki/NATO_phonetic_alphabet
 
@@ -213,12 +213,11 @@ file in the repository will always be transparently encrypted.
 
 This can be applied to files that are already in the repository, but that
 command will NOT rebase whole commit history to wipe or encrypt that file
-there - this can be done manually, but might be tricky (e.g. with many
-branches).
+there - this can be done manually, but might be tricky (e.g. with many branches).
 
 ``git nerps taint`` also has -l/--local-only option to use
-".git/info/attributes" (which is not shared between repo clones) instead to
-the same effect.
+".git/info/attributes" (which is not shared between repo clones)
+instead to the same effect.
 
 ``git nerps clear`` removes "taint" from file(s), if it's ever necessary.
 
@@ -228,22 +227,21 @@ exactly one such match (see also --force and --silent options), so it's
 perfectly fine to add any valid patterns there by hand, these commands should
 pick these up.
 
-Note that neither "taint" nor "clear" do not touch contents of the actual file's
-in the local copy (i.e. on fs) at all - only set git attributes for future git
-commits.
+Note that neither "taint" nor "clear" touch contents of actual file's in the
+local copy (i.e. on fs) at all - only set git attributes for future git commits.
 
 
 Wipe accidentally-comitted secret from git repo
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Just ``git rm`` on the file obviously won't get it done, as previous commits
-will still have the file.
+will still have the file in plaintext.
 
 Rebasing can wipe it from those, but one'd still be able to recover old tree via
 git-reflog, so that has to be cleaned-up as well, and then git's
 garbage-collection mechanism should be run to purge unlinked blobs.
 
-Hence steps that I think are necessary for a **local** repository::
+Removing file(s) from **local** branches can be done like this::
 
   % git filter-branch --index-filter \
     "git rm -rf --cached --ignore-unmatch $files" HEAD
@@ -252,30 +250,29 @@ Hence steps that I think are necessary for a **local** repository::
     "git rm -rf --cached --ignore-unmatch $files" some-other-branch
   ...
 
-  % rm -rf .git/refs/original/
-  % git reflog expire --expire-unreachable=now --all
-  % git gc --aggressive --prune=now
-
-Pushing rebase result (even without cleaning-up local ".git" dir) to a *bare*
-remote repo (no local copy, as e.g. gitolite creates these) should get rid of
-the file(s) there as well (or maybe with an extra "git gc" command), as those
-don't keep reflog history by default.
-
-Note that all combinations of branches and files should be processed by ``git
+All combinations of branches and files should be processed by ``git
 filter-branch`` above, including any branches that are currently present on
-remotes only (i.e. pull/filter/push all these as well)!
+remotes only (i.e. pull/filter/push -f all these as well)!
 
-If it is really sensitive data though, I'd suggest exporting *new* git history
-(e.g. via "git fast-export"), making sure data is not there (simple grep
-should do it), and re-initializing both local and remote repos from that.
+But note that local ".git" dir will still contain these files in various caches
+and refs (think reflog).
 
-This should ensure that there's no other data in the new ".git" dir but what's
-in that fast-export dump, without relying on git internals like reflog and gc
-behavior (which commands above do), which can and do change over time.
+While it's possible to purge at least some of these with "git reflog expire" and
+"git gc" and some "rm -rf" commands, there is no guarantee that something won't
+remain (e.g. --textconv cache, unlinked file in objects, etc).
 
-It might also be necessary to find all cloned copies and purging those, so that
-".git" there is clean and there's no chance that branch with secrets will be
-pushed back to remote from there.
+To get clean .git directory, cloning it anew from local or remote repo copy
+should work.
+
+Pushing rebase result to a *bare* remote repo (no local copy, as e.g. gitolite
+creates these) might get rid of the file(s) there as well (or maybe with an
+extra ``git gc --aggressive --prune=now`` command), as those don't keep reflog
+history by default, but be sure to check for extra branches there and it can
+still be unreliable and a subject to change.
+
+One way to check for leftover secrets in the filtered/cloned repo branches can
+be exporting it via "git fast-export", making sure data is not there (simple
+grep should do it), and re-initializing both local and remote repos from that.
 
 
 Encrypt/decrypt local file
@@ -285,12 +282,11 @@ Note that this is the opposite of what "taint" does, where actual local file is
 never touched, and it's only blobs in ".git" that get encrypted.
 
 So doesn't need to be run manually along with "taint" or anything like that,
-just an extra for encrypting non-git stuff with the same key for whatever other
-purposes.
+just an extra option for encrypting non-git stuff with the same key for whatever
+other purposes.
 
-This tool is only designed to operate on really small files (up to a megabyte or
-a few), use gpg (and with assymetric keys) on any larger files, especially if
-you need good and proven security margin.
+This tool is only designed to operate on small files (up to a megabyte or a few),
+for larger files I'd suggest using gpg with assymetric keys instead.
 
 ::
 
@@ -357,8 +353,8 @@ Most obvious ways to do that are:
 * ``git log --stat`` / ``git diff --stat``.
 
   Encrypted files in ``--stat`` output show up as binary blobs, which can be
-  easy enough to spot for an otherwise text files, without inspecting stuff with
-  git-show.
+  easy enough to spot for an otherwise text files, without inspecting every file
+  with git-show.
 
 * ``git clone``.
 
@@ -376,7 +372,7 @@ Installation
 
 Requirements:
 
-* Python 3.6+ (dig up repo history for old 2.x version)
+* Python 3.6+ (dig up repo history for an old 2.7 version)
 
 * libnacl_ or PyNaCl_ python module - either one will work,
   and they're interoperable with each other (use same libsodium),
@@ -397,6 +393,7 @@ That's it.
 
 
 
+
 Drawbacks, quirks and warnings
 ------------------------------
 
@@ -405,7 +402,7 @@ Drawbacks, quirks and warnings
 
   | I (author) don't use it to store data that is valuable,
   | sensitive or can get me in trouble in any of my public git repositories.
-  | Not a single such file on my git server or github.
+  | Not a single such file on my public git server or github.
   | Think about it.
 
   My use-case is to have shared configuration repositories, to which -
@@ -513,11 +510,12 @@ Drawbacks, quirks and warnings
 
 
 
+
 Affected files and git-config params
 ------------------------------------
 
-All files are using git configuration formats - either gitconfig or
-gitattributes, more info on which can be found in `git-config(1)`_.
+All files are using git configuration formats,
+more info on which can be found in `git-config(1)`_.
 
 
 Files
