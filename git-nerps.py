@@ -416,10 +416,12 @@ def ssh_key_hash(conf, nacl, path):
 				print('WARNING:')
 				cmd = ['ssh-keygen', '-p', '-N', '', '-f', tmp.name]
 				log.debug('Running interactive ssh-keygen to decrypt key: {}', ' '.join(cmd))
-				err, stdout = None, sp.run(cmd, check=True, stdout=sp.PIPE).stdout.splitlines()
+				err, p = None, sp.run( cmd, check=True,
+					encoding='utf-8', errors='replace', stdout=sp.PIPE, stderr=sp.PIPE )
+				stdout, stderr = p.stdout.splitlines(), p.stderr.splitlines()
 
 		if err or 'Your identification has been saved with the new passphrase.' not in stdout:
-			for lines in stdout, stderr: print('\n'.join(lines), file=sys.stderr)
+			for lines in stdout, stderr: print('\n'.join(lines).decode(), file=sys.stderr)
 			raise SSHKeyError(( 'ssh-keygen failed to process key {},'
 				' see stderr output above for details, command: {}' ).format(path, ' '.join(cmd)))
 
@@ -434,7 +436,7 @@ def ssh_key_hash(conf, nacl, path):
 						f' private key detected in file, aborting: {path!r}' )
 				assert not key
 				key.append('')
-		if not done: raise SSHKeyError('Incomplete or missing key in file: {path!r}')
+		if not done: raise SSHKeyError(f'Incomplete or missing key in file: {path!r}')
 		key_bytes = b64_decode(''.join(key))
 		key = io.BytesIO(key_bytes)
 
@@ -465,10 +467,10 @@ def ssh_key_hash(conf, nacl, path):
 			line = io.BytesIO(line)
 			key_t = key_read_bytes(line).decode()
 			key_assert(key_t == 'ssh-ed25519', 'Unsupported pubkey type: {!r}', key_t)
-			ed2519_pk = key_read_bytes(line)
+			ed25519_pk = key_read_bytes(line)
 			line = line.read()
 			key_assert(not line, 'Garbage data after pubkey: {!r}', line)
-			pubkeys.append(ed2519_pk)
+			pubkeys.append(ed25519_pk)
 		privkey = io.BytesIO(key_read_bytes())
 		pos, tail = key.tell(), key.read()
 		key_assert( not tail,
@@ -479,19 +481,19 @@ def ssh_key_hash(conf, nacl, path):
 		key_assert(n1 == n2, 'checkint values mismatch in private key spec: {!r} != {!r}', n1, n2)
 		key_t = key_read_bytes().decode()
 		key_assert(key_t == 'ssh-ed25519', 'Unsupported key type: {!r}', key_t)
-		ed2519_pk = key_read_bytes()
-		key_assert(ed2519_pk in pubkeys, 'Pubkey mismatch - {!r} not in {}', ed2519_pk, pubkeys)
-		ed2519_sk = key_read_bytes()
+		ed25519_pk = key_read_bytes()
+		key_assert(ed25519_pk in pubkeys, 'Pubkey mismatch - {!r} not in {}', ed25519_pk, pubkeys)
+		ed25519_sk = key_read_bytes()
 		key_assert(
-			len(ed2519_pk) == 32 and len(ed2519_sk) == 64,
-			'Key length mismatch: {}/{} != 32/64', len(ed2519_pk), len(ed2519_sk) )
+			len(ed25519_pk) == 32 and len(ed25519_sk) == 64,
+			'Key length mismatch: {}/{} != 32/64', len(ed25519_pk), len(ed25519_sk) )
 		comment = key_read_bytes()
 		padding = key.read()
 		padding, padding_chk = bytearray(padding), bytearray(range(1, len(padding) + 1))
 		key_assert(padding == padding_chk, 'Invalid padding: {!r} != {!r}', padding, padding_chk)
 		log.debug('Parsed {} key, comment: {!r}', key_t, comment)
 
-	return hashlib.pbkdf2_hmac( 'sha256', ed2519_sk,
+	return hashlib.pbkdf2_hmac( 'sha256', ed25519_sk,
 		conf.pbkdf2_salt, conf.pbkdf2_rounds, nacl.key_size )
 
 
