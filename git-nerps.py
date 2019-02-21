@@ -1,21 +1,16 @@
-#!/usr/bin/env python2
-# -*- coding: utf-8 -*-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-from contextlib import contextmanager
-from os.path import ( join, expanduser, isdir, basename,
-	realpath, dirname, abspath, exists, samefile, normpath, relpath )
-import os, sys, io, re, types, logging
-import stat, tempfile, fcntl, subprocess
-import hmac, hashlib, base64
+import os, sys, io, re, types, logging, pathlib as pl
+import stat, tempfile, fcntl, subprocess as sp
+import contextlib, hmac, hashlib, struct, base64
 
 
-b64_encode = base64.urlsafe_b64encode
-b64_decode = lambda s:\
-	base64.urlsafe_b64decode(s) if '-' in s or '_' in s else s.decode('base64')
+b64_encode = lambda s: base64.urlsafe_b64encode(s).decode()
+b64_decode = lambda s: ( base64.urlsafe_b64decode
+	if '-' in s or '_' in s else base64.standard_b64decode )(s)
 
-class Conf(object):
+class Conf:
 
 	key_name_pool = [ # NATO phonetic alphabet
 		'alfa', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf',
@@ -23,13 +18,13 @@ class Conf(object):
 		'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform', 'victor',
 		'whiskey', 'x-ray', 'yankee', 'zulu' ]
 
-	umask = 0700 # for files where keys are stored
+	umask = 0o0700 # for files where keys are stored
 
 	script_link = '~/.git-nerps'
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
-	enc_magic = '¯\_ʻnerpsʻ_/¯'
+	enc_magic = '¯\_ʻnerpsʻ_/¯'.encode()
 	nonce_key = enc_magic
 	pbkdf2_salt = enc_magic
 	pbkdf2_rounds = int(5e5)
@@ -43,7 +38,25 @@ class Conf(object):
 	def get(self, *k): return getattr(self, '_'.join(k))
 
 
-class NaCl(object):
+err_fmt = lambda err: '[{}] {}'.format(err.__class__.__name__, err)
+
+class LogMessage:
+	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
+	def __str__(self): return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
+
+class LogStyleAdapter(logging.LoggerAdapter):
+	def __init__(self, logger, extra=None):
+		super(LogStyleAdapter, self).__init__(logger, extra or {})
+	def log(self, level, msg, *args, **kws):
+		if not self.isEnabledFor(level): return
+		log_kws = {} if 'exc_info' not in kws else dict(exc_info=kws.pop('exc_info'))
+		msg, kws = self.process(msg, kws)
+		self.logger._log(level, LogMessage(msg, args, kws), (), **log_kws)
+
+get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
+
+class NaCl:
 
 	nonce_size = key_size = key_encode = key_decode = random = error = None
 
@@ -75,34 +88,36 @@ class NaCl(object):
 				from nacl.utils import random
 			self.nonce_size = SecretBox.NONCE_SIZE
 			self.key_size = SecretBox.KEY_SIZE
-			self.key_encode = lambda key: key.encode(URLSafeBase64Encoder).strip()
+			self.key_encode = lambda key: key.encode(URLSafeBase64Encoder).decode().strip()
 			self.key_decode = lambda key_str, raw=False:\
 				SecretBox(key_str, URLSafeBase64Encoder if not raw else RawEncoder)
 			self.random = random
 			self.error = CryptoError
 
-	def test( self, msg='test',
+	def test( self, msg=b'test',
 			key_enc='pbb6wrDXlLWOFMXYH4a9YHh7nGGD1VnStVYQBe9MyVU=' ):
 		key = self.key_decode(self.random(self.key_size), raw=True)
 		assert key.decrypt(key.encrypt(msg, self.random(self.nonce_size)))
 		key = self.key_decode(key_enc)
 		assert self.key_encode(key) == key_enc
-		msg_enc = key.encrypt(msg, key_enc[:self.nonce_size])
+		msg_enc = key.encrypt(msg, key_enc[:self.nonce_size].encode())
 		msg_dec = key.decrypt(msg_enc)
 		assert msg_dec == msg
-		print(hashlib.sha256(''.join([
-			bytes(self.key_size), bytes(self.nonce_size),
-			self.key_encode(key), msg, msg_enc, msg_dec ])).hexdigest())
+		print(hashlib.sha256(b''.join([
+			str(self.key_size).encode(), str(self.nonce_size).encode(),
+			self.key_encode(key).encode(), msg, msg_enc, msg_dec ])).hexdigest())
 
 
-@contextmanager
-def safe_replacement(path, mode=None):
+@contextlib.contextmanager
+def safe_replacement(path, *open_args, mode=None, **open_kws):
+	path = str(path)
 	if mode is None:
-		try: mode = stat.S_IMODE(os.lstat(path).st_mode)
-		except (OSError, IOError): pass
-	kws = dict( delete=False,
+		with contextlib.suppress(OSError):
+			mode = stat.S_IMODE(os.lstat(path).st_mode)
+	open_kws.update( delete=False,
 		dir=os.path.dirname(path), prefix=os.path.basename(path)+'.' )
-	with tempfile.NamedTemporaryFile(**kws) as tmp:
+	if not open_args: open_kws['mode'] = 'w'
+	with tempfile.NamedTemporaryFile(*open_args, **open_kws) as tmp:
 		try:
 			if mode is not None: os.fchmod(tmp.fileno(), mode)
 			yield tmp
@@ -111,24 +126,20 @@ def safe_replacement(path, mode=None):
 		except CancelFileReplacement: pass
 		finally:
 			try: os.unlink(tmp.name)
-			except (OSError, IOError): pass
+			except OSError: pass
 
 class CancelFileReplacement(Exception): pass
 safe_replacement.cancel = CancelFileReplacement
 
-@contextmanager
-def edit(path):
-	with safe_replacement(path) as tmp:
-		if not exists(path): yield None, tmp
+@contextlib.contextmanager
+def edit(path, text=False):
+	mb = 'b' if not text else ''
+	with safe_replacement(path, f'w{mb}') as tmp:
+		if not os.path.exists(path): yield None, tmp
 		else:
-			with open(path, 'rb') as src: yield src, tmp
+			with open(path, f'r{mb}') as src: yield src, tmp
 
 edit.cancel = CancelFileReplacement
-
-def dev_null():
-	if not hasattr(dev_null, 'cache'):
-		dev_null.cache = open(os.devnull, 'wb+')
-	return dev_null.cache
 
 def with_src_lock(shared=False):
 	lock = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
@@ -140,28 +151,28 @@ def with_src_lock(shared=False):
 			finally:
 				try: fcntl.lockf(src, fcntl.LOCK_UN)
 				except (OSError, IOError) as err:
-					log.exception('Failed to unlock file object: %s', err)
+					log.exception('Failed to unlock file object: {}', err)
 		return _wrapper
 	return _decorator
 
 def path_escape(path):
 	assert path.strip() == path, repr(path) # trailing spaces should be escaped
 	for c in '#!':
-		if path.startswith(c): path = r'\{}{}'.format(c, path[1:])
+		if path.startswith(c): path = rf'\{c}{path[1:]}'
 	return path.replace('*', r'\*')
 
 def filter_git_patterns(src, tmp, path_rel, _ree=re.escape):
-	if not src: src = io.BytesIO()
+	if not src: src = io.StringIO()
 	for n, line in enumerate(iter(src.readline, ''), 1):
 		ls, act = line.strip(), None
 		assert not ls.endswith('\\'), repr(line) # not handling these escapes
 		if ls and not ls.startswith('#'):
 			pat, filters = ls.split(None, 1)
 			pat_re = _ree(pat.lstrip('/')).replace(_ree('**'), r'(.+)').replace(_ree('*'), r'([^\/]+)')
-			if '/' in pat: pat_re = '^{}'.format(pat_re)
+			if '/' in pat: pat_re = f'^{pat_re}'
 			if re.search(pat_re, path_rel): act = yield n, line, pat, filters
-		if not act: tmp.write('{}\n'.format(line.rstrip()))
-		elif isinstance(act, bytes): tmp.write('{}\n'.format(act.rstrip()))
+		if not act: tmp.write(f'{line.rstrip()}\n')
+		elif isinstance(act, bytes): tmp.write(f'{act.rstrip()}\n')
 		elif act is filter_git_patterns.remove: pass
 		else: raise ValueError(act)
 
@@ -169,7 +180,7 @@ filter_git_patterns.remove = object()
 
 def cached_result(key_or_func=None, _key=None):
 	if callable(key_or_func):
-		_key = _key or key_or_func.func_name
+		_key = _key or key_or_func.__name__
 		@ft.wraps(key_or_func)
 		def _wrapper(self, *args, **kws):
 			if _key not in self.c:
@@ -181,11 +192,11 @@ def cached_result(key_or_func=None, _key=None):
 
 class GitWrapperError(Exception): pass
 
-class GitWrapper(object):
+class GitWrapper:
 
 	def __init__(self, conf, nacl):
 		self.conf, self.nacl, self.c, self.lock = conf, nacl, dict(), None
-		self.log = logging.getLogger('git')
+		self.log = get_logger('git')
 
 	def __enter__(self):
 		self.init()
@@ -198,38 +209,33 @@ class GitWrapper(object):
 
 	def init_lock(self, gitconfig):
 		if self.lock: return
-		lock = b64_encode(hashlib.sha256(realpath(gitconfig)).digest())[:8]
-		lock = join(tempfile.gettempdir(), '.git-nerps.{}.lock'.format(lock))
-		self.lock = open(lock, 'ab+')
-		self.log.debug('Acquiring lock: %r', lock)
+		lock = b64_encode(hashlib.sha256(bytes(gitconfig.resolve(True))).digest())[:8]
+		lock = pl.Path(tempfile.gettempdir()) / f'.git-nerps.{lock}.lock'
+		self.lock = lock.open('ab+')
+		self.log.debug('Acquiring lock: {}', lock)
 		fcntl.lockf(self.lock, fcntl.LOCK_EX)
 
 	def destroy(self):
 		if self.lock:
-			self.log.debug('Releasing lock: %r', self.lock.name)
+			self.log.debug('Releasing lock: {}', self.lock.name)
 			self.lock.close()
 			self.lock = None
 
 
-	@property
-	def dev_null(self): return dev_null()
-
-	run_error = subprocess.CalledProcessError
-
 	def run(self, args=None, check=False, no_stderr=False, trap_code=None):
-		kws = dict(close_fds=True)
-		if no_stderr: kws['stderr'] = self.dev_null
+		kws = dict(check=True, stdout=sp.PIPE)
+		if no_stderr: kws['stderr'] = sp.DEVNULL
 		args = ['git'] + list(args or list())
 		if self.log.isEnabledFor(logging.DEBUG):
-			opts = ', '.join( bytes(k) for k, v in
+			opts = ', '.join( str(k) for k, v in
 				{'check': check, 'no-stderr': no_stderr, 'trap': trap_code}.items() if v )
-			self.log.debug('run: %s [%s]', ' '.join(args), opts or '-')
-		try: res = subprocess.check_output(args, **kws).splitlines()
-		except self.run_error as err:
+			self.log.debug('run: {} [{}]', ' '.join(args), opts or '-')
+		try: res = sp.run(args, **kws).stdout.decode().splitlines()
+		except sp.CalledProcessError as err:
 			if check: return False
 			if trap_code:
 				if trap_code is True: pass
-				elif isinstance(trap_code, (int, long)): trap_code = [trap_code]
+				elif isinstance(trap_code, int): trap_code = [trap_code]
 				if trap_code is True or err.returncode in trap_code: err = res = None
 			if err: raise
 		return res if not check else True
@@ -239,19 +245,21 @@ class GitWrapper(object):
 
 	def run_conf(self, args, gitconfig=None, **run_kws):
 		gitconfig = gitconfig or self.path_conf
-		return self.run(['config', '--file', gitconfig] + args, **run_kws)
+		return self.run(['config', '--file', str(gitconfig)] + args, **run_kws)
 
 	def sub(self, *path):
 		if not self.c.get('git-dir'):
 			p = self.run(['rev-parse', '--show-toplevel'])
 			assert len(p) == 1, [p, 'rev-cache --show-toplevel result']
-			self.c['git-dir'] = join(p[0], '.git')
+			self.c['git-dir'] = pl.Path(p[0]) / '.git'
 		if not path: return self.c['git-dir']
-		return join(self.c['git-dir'], *path)
+		p = self.c['git-dir']
+		for s in path: p /= s
+		return p
 
 	def param(self, *path):
 		assert path and all(path), path
-		return 'nerps.{}'.format('.'.join(path))
+		return f'nerps.{".".join(path)}'
 
 	@property
 	def force_conf_home(self):
@@ -264,7 +272,7 @@ class GitWrapper(object):
 	@property
 	@cached_result
 	def path_conf_home(self):
-		return expanduser(self.conf.git_conf_home)
+		return pl.Path(self.conf.git_conf_home).expanduser()
 
 	@property
 	@cached_result
@@ -290,13 +298,12 @@ class GitWrapper(object):
 
 			if not ver:
 				if not os.access(__file__, os.X_OK):
-					self.log.warn( 'This script (%r) must be executable'
+					self.log.warn( 'This script ({}) must be executable'
 						' (e.g. run "chmod +x" on it) for git filters to work!' )
-				script_link_abs = expanduser(self.conf.script_link)
-				if not exists(script_link_abs) or not samefile(script_link_abs, __file__):
-					try: os.unlink(script_link_abs)
-					except (OSError, IOError): pass
-					os.symlink(abspath(__file__), script_link_abs)
+				script_link_abs = pl.Path(self.conf.script_link).expanduser()
+				if not script_link_abs.exists() or not script_link_abs.samefile(__file__):
+					with contextlib.suppress(OSError): script_link_abs.unlink()
+					script_link_abs.symlink_to(os.path.abspath(__file__))
 
 				run_conf(['--remove-section', 'filter.nerps'], trap_code=True, no_stderr=True)
 				run_conf(['--remove-section', 'diff.nerps'], trap_code=True, no_stderr=True)
@@ -316,19 +323,19 @@ class GitWrapper(object):
 
 			else: run_conf(['--unset-all', ver_k], trap_code=5)
 			# Any future migrations go here
-			run_conf(['--add', ver_k, bytes(self.conf.git_conf_version)])
+			run_conf(['--add', ver_k, str(self.conf.git_conf_version)])
 
 		if chmod_umask is None: chmod_umask = self.conf.umask
 		if chmod_dir:
-			git_repo_dir = dirname(gitconfig)
-			os.chmod(git_repo_dir, os.stat(git_repo_dir).st_mode & chmod_umask)
-		os.chmod(gitconfig, os.stat(gitconfig).st_mode & chmod_umask)
+			git_repo_dir = gitconfig.parent
+			git_repo_dir.chmod(git_repo_dir.stat().st_mode & chmod_umask)
+		gitconfig.chmod(gitconfig.stat().st_mode & chmod_umask)
 
 
 	def _key_iter(self):
 		key_re = re.compile(r'^{}\.(.*)$'.format(re.escape(self.param('key'))))
 		for gitconfig in self.sub('config'), self.path_conf_home:
-			if not exists(gitconfig): continue
+			if not gitconfig.exists(): continue
 			for line in self.run_conf(['--list'], gitconfig):
 				k, v = line.split('=', 1)
 				m = key_re.search(k)
@@ -366,13 +373,13 @@ class GitWrapper(object):
 	def key(self, name=None):
 		name = name or self.key_name_default
 		if not name:
-			raise GitWrapperError('No keys found in config: {!r}'.format(self.path_conf))
+			raise GitWrapperError(f'No keys found in config: {self.path_conf}')
 		for key in reversed(self.key_all):
 			if key.name == name: break
 		else:
 			raise GitWrapperError(( 'Key {!r} is set as default'
-				' but is unavailable (in config: {!r})' ).format(name, self.path_conf))
-		self.log.debug('Using key: %s', name)
+				' but is unavailable (in config: {})' ).format(name, self.path_conf))
+		self.log.debug('Using key: {}', name)
 		return key
 
 
@@ -380,92 +387,89 @@ class SSHKeyError(Exception): pass
 
 def ssh_key_hash(conf, nacl, path):
 	# See PROTOCOL.key and sshkey.c in openssh sources
-	import struct
-	log = logging.getLogger('ssh-key-hash')
+	log = get_logger('ssh-key-hash')
 
 	with tempfile.NamedTemporaryFile(
-			delete=True, dir=dirname(path), prefix=basename(path)+'.' ) as tmp:
-		tmp.write(open(path).read())
+			delete=True, dir=path.parent, prefix=path.name+'.' ) as tmp:
+		tmp.write(path.read_bytes())
 		tmp.flush()
-		with tempfile.TemporaryFile() as stderr:
-			cmd = ['ssh-keygen', '-p', '-P', '', '-N', '', '-f', tmp.name]
-			p = subprocess.Popen( cmd, stdin=dev_null(),
-				stdout=subprocess.PIPE, stderr=stderr, close_fds=True )
-			stdout = p.stdout.read().splitlines()
-			err = p.wait()
-			stderr.seek(0)
-			stderr = stderr.read().splitlines()
+		cmd = ['ssh-keygen', '-p', '-P', '', '-N', '', '-f', tmp.name]
+		p = sp.run( cmd, encoding='utf-8', errors='replace',
+			stdin=sp.DEVNULL, stdout=sp.PIPE, stderr=sp.PIPE )
+		stdout, stderr = p.stdout.splitlines(), p.stderr.splitlines()
+		err = p.returncode
 
 		if err:
-			if stdout: sys.stderr.write('\n'.join(stdout + ['']))
+			if stdout: print('\n'.join(stdout), file=sys.stderr)
 			key_enc = False
 			for line in stderr:
 				if re.search( r'^Failed to load key .*:'
 						r' incorrect passphrase supplied to decrypt private key$', line ):
 					key_enc = True
-				else: sys.stderr.write('{}\n'.format(line))
+				else: print(line, file=sys.stderr)
 			if key_enc:
 				print('WARNING:')
 				print( 'WARNING: !!! ssh key will be decrypted'
-					' (via ssh-keygen) to a temporary file {!r} in the next step !!!'.format(tmp.name) )
+					f' (via ssh-keygen) to a temporary file {tmp.name!r} in the next step !!!' )
 				print('WARNING: DO NOT enter key passphrase'
 					' and ABORT operation (^C) if that is undesirable.')
 				print('WARNING:')
 				cmd = ['ssh-keygen', '-p', '-N', '', '-f', tmp.name]
-				log.debug('Running interactive ssh-keygen to decrypt key: %s', ' '.join(cmd))
-				err, stdout = None, subprocess.check_output(cmd, close_fds=True)
+				log.debug('Running interactive ssh-keygen to decrypt key: {}', ' '.join(cmd))
+				err, stdout = None, sp.run(cmd, check=True, stdout=sp.PIPE).stdout.splitlines()
 
 		if err or 'Your identification has been saved with the new passphrase.' not in stdout:
-			for lines in stdout, stderr: sys.stderr.write('\n'.join(lines + ['']))
-			raise SSHKeyError(( 'ssh-keygen failed to process key {!r},'
+			for lines in stdout, stderr: print('\n'.join(lines), file=sys.stderr)
+			raise SSHKeyError(( 'ssh-keygen failed to process key {},'
 				' see stderr output above for details, command: {}' ).format(path, ' '.join(cmd)))
 
 		tmp.seek(0)
-		lines, key, done = tmp.read().splitlines(), list(), False
+		lines, key, done = tmp.read().decode().splitlines(), list(), False
 		for line in lines:
 			if line == '-----END OPENSSH PRIVATE KEY-----': done = True
 			if key and not done: key.append(line)
 			if line == '-----BEGIN OPENSSH PRIVATE KEY-----':
 				if done:
-					raise SSHKeyError( 'More than one private'
-						' key detected in file, aborting: {!r}'.format(path) )
+					raise SSHKeyError( 'More than one'
+						f' private key detected in file, aborting: {path!r}' )
 				assert not key
 				key.append('')
-		if not done: raise SSHKeyError('Incomplete or missing key in file: {!r}'.format(path))
-		key_str = ''.join(key).decode('base64')
-		key = io.BytesIO(key_str)
+		if not done: raise SSHKeyError('Incomplete or missing key in file: {path!r}')
+		key_bytes = b64_decode(''.join(key))
+		key = io.BytesIO(key_bytes)
 
-		def key_read_str(src=None):
+		def key_read_bytes(src=None):
 			if src is None: src = key
 			n, = struct.unpack('>I', src.read(4))
 			return src.read(n)
 
 		def key_assert(chk, err, *fmt_args, **fmt_kws):
+			if chk: return
 			if fmt_args or fmt_kws: err = err.format(*fmt_args, **fmt_kws)
-			err += ' [key file: {!r}, decoded: {!r}]'.format(path, key_str)
-			if not chk: raise SSHKeyError(err)
+			err += f' [key file: {path!r}, decoded: {key_bytes!r}]'
+			raise SSHKeyError(err)
 
 		def key_assert_read(field, val, fixed=False):
-			pos, chk = key.tell(), key.read(len(val)) if fixed else key_read_str()
+			pos, chk = key.tell(), key.read(len(val)) if fixed else key_read_bytes()
 			key_assert( chk == val, 'Failed to match key field'
 				' {!r} (offset: {}) - expected {!r} got {!r}', field, pos, val, chk )
 
-		key_assert_read('AUTH_MAGIC', 'openssh-key-v1\0', True)
-		key_assert_read('ciphername', 'none')
-		key_assert_read('kdfname', 'none')
-		key_assert_read('kdfoptions', '')
+		key_assert_read('AUTH_MAGIC', b'openssh-key-v1\0', True)
+		key_assert_read('ciphername', b'none')
+		key_assert_read('kdfname', b'none')
+		key_assert_read('kdfoptions', b'')
 		(pubkey_count,), pubkeys = struct.unpack('>I', key.read(4)), list()
-		for n in xrange(pubkey_count):
-			line = key_read_str()
+		for n in range(pubkey_count):
+			line = key_read_bytes()
 			key_assert(line, 'Empty public key #{}', n)
 			line = io.BytesIO(line)
-			key_t = key_read_str(line)
+			key_t = key_read_bytes(line).decode()
 			key_assert(key_t == 'ssh-ed25519', 'Unsupported pubkey type: {!r}', key_t)
-			ed2519_pk = key_read_str(line)
+			ed2519_pk = key_read_bytes(line)
 			line = line.read()
 			key_assert(not line, 'Garbage data after pubkey: {!r}', line)
 			pubkeys.append(ed2519_pk)
-		privkey = io.BytesIO(key_read_str())
+		privkey = io.BytesIO(key_read_bytes())
 		pos, tail = key.tell(), key.read()
 		key_assert( not tail,
 			'Garbage data after private key (offset: {}): {!r}', pos, tail )
@@ -473,26 +477,26 @@ def ssh_key_hash(conf, nacl, path):
 		key = privkey
 		n1, n2 = struct.unpack('>II', key.read(8))
 		key_assert(n1 == n2, 'checkint values mismatch in private key spec: {!r} != {!r}', n1, n2)
-		key_t = key_read_str()
+		key_t = key_read_bytes().decode()
 		key_assert(key_t == 'ssh-ed25519', 'Unsupported key type: {!r}', key_t)
-		ed2519_pk = key_read_str()
+		ed2519_pk = key_read_bytes()
 		key_assert(ed2519_pk in pubkeys, 'Pubkey mismatch - {!r} not in {}', ed2519_pk, pubkeys)
-		ed2519_sk = key_read_str()
+		ed2519_sk = key_read_bytes()
 		key_assert(
 			len(ed2519_pk) == 32 and len(ed2519_sk) == 64,
 			'Key length mismatch: {}/{} != 32/64', len(ed2519_pk), len(ed2519_sk) )
-		comment = key_read_str()
+		comment = key_read_bytes()
 		padding = key.read()
-		padding, padding_chk = list(bytearray(padding)), range(1, len(padding) + 1)
-		key_assert(padding == padding_chk, 'Invalid padding: {} != {}', padding, padding_chk)
-		log.debug('Parsed %s key, comment: %r', key_t, comment)
+		padding, padding_chk = bytearray(padding), bytearray(range(1, len(padding) + 1))
+		key_assert(padding == padding_chk, 'Invalid padding: {!r} != {!r}', padding, padding_chk)
+		log.debug('Parsed {} key, comment: {!r}', key_t, comment)
 
 	return hashlib.pbkdf2_hmac( 'sha256', ed2519_sk,
 		conf.pbkdf2_salt, conf.pbkdf2_rounds, nacl.key_size )
 
 
 def is_encrypted(conf, src_or_line, rewind=True):
-	if not isinstance(src_or_line, types.StringTypes):
+	if not isinstance(src_or_line, bytes):
 		pos = src_or_line.tell()
 		line = src_or_line.readline()
 		src_or_line.seek(pos)
@@ -506,7 +510,8 @@ def encrypt(conf, nacl, git, log, name, src=None, dst=None):
 	nonce = conf.nonce_func(plaintext)
 	ciphertext = key.encrypt(plaintext, nonce)
 	dst_stream = io.BytesIO() if not dst else dst
-	dst_stream.write('{} {}\n'.format(conf.enc_magic, conf.git_conf_version))
+	dst_stream.write( conf.enc_magic + b' '
+		+ str(conf.git_conf_version).encode() + b'\n' )
 	dst_stream.write(ciphertext)
 	if not dst: return dst_stream.getvalue()
 
@@ -518,25 +523,27 @@ def decrypt(conf, nacl, git, log, name, src=None, dst=None, strict=False):
 	assert int(ver) <= conf.git_conf_version, ver
 	ciphertext = src.read()
 	try: plaintext = key.decrypt(ciphertext)
-	except nacl.error:
+	except nacl.error as err:
 		if strict: raise
 		err_t, err, err_tb = sys.exc_info()
-		log.debug( 'Failed to decrypt with %s key %r: %s',
+		log.debug( 'Failed to decrypt with {} key {}: {}',
 			'default' if not name else 'specified', key.name, err )
 		for key_chk in git.key_all:
 			if key_chk.name == key.name: continue
-			log.debug('Trying key: %s', key_chk.name)
+			log.debug('Trying key: {}', key_chk.name)
 			try: plaintext = key_chk.decrypt(ciphertext)
 			except nacl.error: pass
 			else: break
-		else: raise err_t, err, err_tb
+		else: raise err.with_traceback(err_tb)
 	if dst: dst.write(plaintext)
 	else: return plaintext
 
 
 
 def run_command(opts, conf, nacl, git):
-	log = logging.getLogger(opts.cmd)
+	log = get_logger(opts.cmd)
+	bin_stdin = open(sys.stdin.fileno(), 'rb')
+	bin_stdout = open(sys.stdout.fileno(), 'wb')
 	exit_code = 0
 
 
@@ -555,12 +562,12 @@ def run_command(opts, conf, nacl, git):
 			key_path = opts.from_ssh_key
 			if not key_path or key_path in ['ed25519']:
 				key_path = list(
-					expanduser('~/.ssh/id_{}'.format(p))
+					pl.Path(f'~/.ssh/id_{p}').expanduser()
 					for p in ([key_path] if key_path else ['ed25519']) )
-				key_path = filter(exists, key_path)
+				key_path = list(p for p in key_path if p.exists())
 				if len(key_path) != 1:
-					opts.parser.error(( 'Key spec must match exactly'
-						' one key path, matched: {}' ).format(', '.join(key_path)))
+					opts.parser.error(( 'Key spec must match'
+						f' exactly one key path, matched: {", ".join(key_path)}' ))
 				key_path, = key_path
 			if opts.from_ssh_key_pbkdf2_params:
 				rounds, salt = opts.from_ssh_key_pbkdf2_params.split('/', 1)
@@ -570,7 +577,7 @@ def run_command(opts, conf, nacl, git):
 		key_str = nacl.key_encode(key)
 
 		if opts.print:
-			print('Key:\n  ', key_str, '\n')
+			print(f'Key:\n  {key_str}\n')
 			return
 
 		if opts.name_arg: opts.name = opts.name_arg
@@ -594,22 +601,22 @@ def run_command(opts, conf, nacl, git):
 					' key name, specify one explicitly with --name.')
 		k = git.param('key', name)
 
-		log.info('Adding key %r to gitconfig (k: %s): %r', name, k, gitconfig)
-		if opts.verbose: print('Generated new key {!r}:\n  {}\n'.format(name, key_str))
+		log.info('Adding key {!r} to gitconfig (k: {}): {}', name, k, gitconfig)
+		if opts.verbose: print(f'Generated new key {name!r}:\n  {key_str}\n')
 
 		# To avoid flashing key on command line (which can be seen by any
 		#  user in same pid ns), "git config --add" is used with unique tmp_token
 		#  here, which is then replaced (in the config file) by actual key.
 
-		with open(gitconfig, 'rb') as src: gitconfig_str = src.read()
+		gitconfig_str = gitconfig.read_text()
 		while True:
-			tmp_token = os.urandom(18).encode('base64').strip()
+			tmp_token = b64_encode(os.urandom(18)).strip()
 			if tmp_token not in gitconfig_str: break
 
 		commit = False
 		try:
 			run_conf(['--add', k, tmp_token])
-			with edit(gitconfig) as (src, tmp):
+			with edit(gitconfig, text=True) as (src, tmp):
 				gitconfig_str = src.read()
 				assert tmp_token in gitconfig_str, tmp_token
 				tmp.write(gitconfig_str.replace(tmp_token, key_str))
@@ -634,13 +641,13 @@ def run_command(opts, conf, nacl, git):
 		k_dst = git.param('key-default')
 		k = git.run_conf(['--get', k_dst], trap_code=1)
 
-		if k: # make sure default key is the right one and is available
-			k, = k
+		if k or opts.name_arg: # make sure default key is the right one and is available
+			if k: k, = k
 			k_updated = opts.name and k != opts.name and opts.name
 			if k_updated: k = opts.name
 			v = git.run_conf(['--get', git.param('key', k)])
 			if not v and opts.name:
-				opts.parser.error('Key %r was not found in config file: %r', k, git.path_conf)
+				opts.parser.error('Key {!r} was not found in config file: {}', k, git.path_conf)
 			k = None if not v else (k_updated or True) # True - already setup
 
 		if not k: k = git.key_name_any # pick first random key
@@ -665,38 +672,38 @@ def run_command(opts, conf, nacl, git):
 			git.force_conf_home = True
 		elif opts.git and not git.check():
 			opts.parser.error('Not in a git repository and --git option was specified.')
-		key_names = map(op.attrgetter('name'), git.key_all)
+		key_names = list(k.name for k in git.key_all)
 		for n_def, name in reversed(list(enumerate(key_names))):
 			if name == git.key_name_default: break
 		for n, name in enumerate(key_names):
-			print('{}{}'.format(name, ' [default]' if n == n_def else ''))
+			print(name + (' [default]' if n == n_def else ''))
 
 
 	##########
 	elif opts.cmd == 'git-clean':
-		src = io.BytesIO(sys.stdin.read())
+		src = io.BytesIO(bin_stdin.read())
 		if is_encrypted(conf, src):
 			log.error( '(Supposedly) plaintext file contents'
-				' seem to be already encrypted, refusing to encrypt: %r', opts.path)
+				' seem to be already encrypted, refusing to encrypt: {}', opts.path)
 			return 1
-		encrypt(conf, nacl, git, log, opts.name, src=src, dst=sys.stdout)
-		sys.stdout.close() # to make sure no garbage data will end up there
+		encrypt(conf, nacl, git, log, opts.name, src=src, dst=bin_stdout)
+		bin_stdout.close() # to make sure no garbage data will end up there
 
 	##########
 	elif opts.cmd in ['git-smudge', 'git-diff']:
-		if opts.cmd == 'git-diff': src = open(opts.path, 'rb')
-		else: src = io.BytesIO(sys.stdin.read())
+		if opts.cmd == 'git-diff': src = opts.path.open('rb')
+		else: src = io.BytesIO(bin_stdin.read())
 		try:
 			if not is_encrypted(conf, src):
 				if opts.cmd != 'git-diff':
 					# XXX: filter history or at least detect whether that's the case
-					log.warn( '%s - file seem to be unencrypted in the repo'
-						' (ignore this error when marking files with history): %r', opts.cmd, opts.path )
-				sys.stdout.write(src.read())
+					log.warn( '{} - file seem to be unencrypted in the repo'
+						' (ignore this error when marking files with history): {}', opts.cmd, opts.path )
+				bin_stdout.write(src.read())
 			else:
 				decrypt( conf, nacl, git, log, opts.name,
-					src=src, dst=sys.stdout, strict=opts.name_strict )
-			sys.stdout.close() # to make sure no garbage data will end up there
+					src=src, dst=bin_stdout, strict=opts.name_strict )
+			bin_stdout.close() # to make sure no garbage data will end up there
 		finally: src.close()
 
 
@@ -706,7 +713,7 @@ def run_command(opts, conf, nacl, git):
 			with edit(opts.path) as (src, tmp):
 				if not opts.force and is_encrypted(conf, src): raise edit.cancel
 				encrypt(conf, nacl, git, log, opts.name, src=src, dst=tmp)
-		else: encrypt(conf, nacl, git, log, opts.name, src=sys.stdin, dst=sys.stdout)
+		else: encrypt(conf, nacl, git, log, opts.name, src=bin_stdin, dst=bin_stdout)
 
 	##########
 	elif opts.cmd == 'decrypt':
@@ -717,7 +724,7 @@ def run_command(opts, conf, nacl, git):
 					src=src, dst=tmp, strict=opts.name_strict )
 		else:
 			decrypt( conf, nacl, git, log, opts.name,
-				src=sys.stdin, dst=sys.stdout, strict=opts.name_strict )
+				src=bin_stdin, dst=bin_stdout, strict=opts.name_strict )
 
 
 	##########
@@ -725,12 +732,12 @@ def run_command(opts, conf, nacl, git):
 		if not git.check(): opts.parser.error('Can only be run inside git repository')
 
 		for path in opts.path:
-			path_rel = relpath(path, git.sub('..'))
+			path_rel = os.path.relpath(path, git.sub('..'))
 			assert not re.search(r'^(\.|/)', path_rel), path_rel
-			attrs_file = normpath(git.sub(
-				'../.gitattributes' if not opts.local_only else 'info/attributes' ))
+			attrs_file = git.sub( '../.gitattributes'
+				if not opts.local_only else 'info/attributes' ).resolve()
 
-			with edit(attrs_file) as (src, tmp):
+			with edit(attrs_file, text=True) as (src, tmp):
 				n, matches_mark, matches = None, dict(), filter_git_patterns(src, tmp, path_rel)
 				while True:
 					try: n, line, pat, filters = next(matches) if n is None else matches.send(act)
@@ -739,8 +746,8 @@ def run_command(opts, conf, nacl, git):
 					if opts.cmd == 'taint':
 						if not opts.force:
 							if not opts.silent:
-								log.error( 'gitattributes (%r) already has matching'
-									' pattern for path %r, not adding another one (line %s): %r',
+								log.error( 'gitattributes ({}) already has matching'
+									' pattern for path {}, not adding another one (line {}): {!r}',
 									attrs_file, path_rel, n, line )
 								# XXX: check if that line also has matching filter, add one
 								exit_code = 1
@@ -750,18 +757,18 @@ def run_command(opts, conf, nacl, git):
 						matches_mark[n] = line
 
 				if opts.cmd == 'taint':
-					tmp.write('/{} filter=nerps diff=nerps\n'.format(path_escape(path_rel)))
+					tmp.write(f'/{path_escape(path_rel)} filter=nerps diff=nerps\n')
 
 				if opts.cmd == 'clear':
 					if not matches_mark:
 						if not opts.silent:
-							log.error( 'gitattributes (%r) pattern'
-								' for path %r was not found', attrs_file, path_rel )
+							log.error( 'gitattributes ({}) pattern'
+								' for path {} was not found', attrs_file, path_rel )
 							exit_code = 1
 						raise edit.cancel
 					if not opts.force and len(matches_mark) > 1:
-						log.error( 'More than one gitattributes (%r) pattern was'
-							' found for path %r, aborting: %r', attrs_file, path_rel, matches_mark.values() )
+						log.error( 'More than one gitattributes ({}) pattern was found'
+							' for path {}, aborting: {!r}', attrs_file, path_rel, matches_mark.values() )
 						exit_code = 1
 						raise edit.cancel
 					src.seek(0)
@@ -775,9 +782,9 @@ def run_command(opts, conf, nacl, git):
 		renames, success = list(), False
 		try:
 			for path in opts.path:
-				with tempfile.NamedTemporaryFile(delete=False,
-						dir=dirname(path), prefix=basename(path)+'.') as tmp:
-					os.rename(path, tmp.name)
+				with tempfile.NamedTemporaryFile(
+						delete=False, dir=path.parent, prefix=path.name+'.' ) as tmp:
+					path.rename(tmp.name)
 					renames.append((tmp.name, path))
 			git.run(['status'])
 			success = True
@@ -786,12 +793,16 @@ def run_command(opts, conf, nacl, git):
 				try: os.rename(src, dst)
 				except:
 					log.exception( 'Failed to restore original'
-						' name for path: %r (tmp-name: %r)', dst, src )
+						' name for path: {} (tmp-name: {})', dst, src )
 		if success: git.run(['status'])
 
 
 
-	else: opts.parser.error('Unrecognized command: {}'.format(opts.cmd))
+	else:
+		if not opts.cmd:
+			opts.parser.error( 'Specify subcommand'
+				' or use -h/--help to see the list and info on these.' )
+		opts.parser.error(f'Unrecognized command: {opts.cmd}')
 	return exit_code
 
 
@@ -799,43 +810,63 @@ def main(args=None, defaults=None):
 	nacl, args = NaCl(), sys.argv[1:] if args is None else args
 	conf = defaults or Conf(nacl)
 
-	import argparse
-	parser = argparse.ArgumentParser(description='Tool to manage encrypted files in a git repo.')
+	import argparse, textwrap
+	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
+	text_fill = lambda s,w=100,ind='\t',ind_next=None,**k: textwrap.fill(
+		s, w, initial_indent=ind, subsequent_indent=ind if ind_next is None else ind_next, **k )
+	class SmartHelpFormatter(argparse.HelpFormatter):
+		def __init__(self, *args, **kws):
+			return super().__init__(*args, **kws, width=100)
+		def _fill_text(self, text, width, indent):
+			if '\n' not in text: return super()._fill_text(text, width, indent)
+			return ''.join( indent + line
+				for line in text.replace('\t', '  ').splitlines(keepends=True) )
+		def _split_lines(self, text, width):
+			return super()._split_lines(text, width)\
+				if '\n' not in text else dedent(text).splitlines()
+
+	parser = argparse.ArgumentParser(
+		formatter_class=SmartHelpFormatter,
+		description='Tool to manage encrypted files in a git repo.' )
 
 	parser.add_argument('-d', '--debug', action='store_true', help='Verbose operation mode.')
 
 	parser.add_argument('-n', '--name', metavar='key-name',
-		help='Key name to use.'
-			' Can be important or required for some commands (e.g. "key-set").'
-			' For most commands, default key gets'
-				' picked either as a first one or the one explicitly set as such.'
-			' When generating new key, default is to pick some'
-				' unused name from the phonetic alphabet letters.')
+		help='''
+			Key name to use.
+			Can be important or required for some commands (e.g. "key-set").
+			For most commands, default key gets
+				picked either as a first one or the one explicitly set as such.
+			When generating new key, default is to pick some
+				unused name from the phonetic alphabet letters.''')
 
 	parser.add_argument('-s', '--name-strict', action='store_true',
-		help='Only try specified or default key for decryption.'
-			' Default it to try other ones if that one fails, to see if any of them work for a file.')
+		help='''
+			Only try specified or default key for decryption.
+			Default it to try other ones if that one fails, to see if any of them work for a file.''')
 
 	cmds = parser.add_subparsers(
 		dest='cmd', title='Actions',
 		description='Supported actions (have their own suboptions as well)')
+	cmds_add_parser = ft.partial(cmds.add_parser, formatter_class=SmartHelpFormatter)
 
 
 	cmd = 'Initialize repository configuration.'
-	cmd = cmds.add_parser('init', help=cmd, description=cmd,
+	cmd = cmds_add_parser('init', help=cmd, description=cmd,
 		epilog='Will be done automatically on any'
 			' other action (e.g. "key-gen"), so can usually be skipped.')
 
 
 	cmd = 'Generate new encryption key and store or just print it.'
-	cmd = cmds.add_parser('key-gen', help=cmd, description=cmd,
-		epilog='Default is to store key in a git repository config'
-				' (but dont set it as default if there are other ones already),'
-				' if inside git repo, otherwise store in the home dir'
-				' (also making it default only if there was none before it).'
-			' Use "key-set" command to pick default key for git repo, user or file.'
-			' System-wide and per-user gitconfig files are never used for key storage,'
-				' as these are considered to be a bad place to store anything private.')
+	cmd = cmds_add_parser('key-gen', help=cmd, description=cmd,
+		epilog=dedent('''
+			Default is to store key in a git repository config
+				(but dont set it as default if there are other ones already),
+				if inside git repo, otherwise store in the home dir'
+				(also making it default only if there was none before it).
+			Use "key-set" command to pick default key for git repo, user or file.
+			System-wide and per-user gitconfig files are never used for key storage,
+				as these are considered to be a bad place to store anything private.'''))
 	cmd.add_argument('name_arg', nargs='?',
 		help='Same as using global --name option, but overrides it if both are used.')
 
@@ -847,77 +878,82 @@ def main(args=None, defaults=None):
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
-		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
+		help=f'Store new key in the {conf.git_conf_home} file (in user home directory).')
 
 	cmd.add_argument('-k', '--from-ssh-key',
 		nargs='?', metavar='ed25519 | path', default=False,
-		help='Derive key from openssh private key'
-				' using PBKDF2-SHA256 with static salt (by default,'
-				' see --from-ssh-key-pbkdf2-params).'
-			' If key is encrypted, error will be raised'
-				' (use "ssh-keygen -p" to provide non-encrypted version).'
-			' Optional argument can specify type of the key'
-				' (only ed25519 is supported though)'
-				' to pick from default location (i.e. ~/.ssh/id_*) or path to the key.'
-			' If optional arg is not specified, any default key will be picked,'
-				' but only if there is exactly one, otherwise error will be raised.')
+		help='''
+			Derive key from openssh private key
+				using PBKDF2-SHA256 with static salt
+				(by default, see --from-ssh-key-pbkdf2-params).
+			If key is encrypted, error will be raised
+				(use "ssh-keygen -p" to provide non-encrypted version).
+			Optional argument can specify type of the key
+				(only ed25519 is supported though)
+				to pick from default location (i.e. ~/.ssh/id_*) or path to the key.
+			If optional arg is not specified, any default key will be picked,
+				but only if there is exactly one, otherwise error will be raised.''')
 	cmd.add_argument('--from-ssh-key-pbkdf2-params', metavar='rounds/salt',
-		help='Number of PBKDF2 rounds and salt to use for --from-ssh-key derivation.'
-			' It is probably a good idea to not use any valuable secret'
-				' as "salt", especially when specifying it on the command line.'
-			' Defaults are: {}/{}'.format(conf.pbkdf2_rounds, conf.pbkdf2_salt))
+		help=f'''
+			Number of PBKDF2 rounds and salt to use for --from-ssh-key derivation.
+			It is probably a good idea to not use any valuable secret
+				as "salt", especially when specifying it on the command line.
+			Defaults are: {conf.pbkdf2_rounds}/{conf.pbkdf2_salt.decode()}''')
 
 	cmd.add_argument('-s', '--set-as-default', action='store_true',
 		help='Set generated key as default in whichever config it will be stored.')
 
 
 	cmd = 'Set default encryption key for a repo/homedir config.'
-	cmd = cmds.add_parser('key-set', help=cmd, description=cmd,
-		epilog='Same try-repo-then-home config order as with key-gen command.'
-			' Key name should be specified with the --name option.'
-			' If no --name will be specified and there is no default key set'
-				' or it no longer available, first (any) available key will be set as default.')
+	cmd = cmds_add_parser('key-set', help=cmd, description=cmd,
+		epilog=dedent('''
+			Same try-repo-then-home config order as with key-gen command.
+			Key name should be specified with the --name option.
+			If no --name will be specified and there is no default key set
+				or it no longer available, first (any) available key will be set as default.'''))
 	cmd.add_argument('name_arg', nargs='?',
 		help='Same as using global --name option, but overrides it if both are used.')
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
-		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
+		help=f'Store new key in the {conf.git_conf_home} file (in user home directory).')
 
 
 	cmd = 'Unset default encryption key for a repo/homedir config.'
-	cmd = cmds.add_parser('key-unset', help=cmd, description=cmd)
+	cmd = cmds_add_parser('key-unset', help=cmd, description=cmd)
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
-		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
+		help=f'Store new key in the {conf.git_conf_home} file (in user home directory).')
 
 
 	cmd = 'List available crypto keys.'
-	cmd = cmds.add_parser('key-list', help=cmd, description=cmd)
+	cmd = cmds_add_parser('key-list', help=cmd, description=cmd)
 	cmd.add_argument('-g', '--git', action='store_true',
 		help='Store new key in git-config, or exit with error if not in git repo.')
 	cmd.add_argument('-d', '--homedir', action='store_true',
-		help='Store new key in the {} file (in user home directory).'.format(conf.git_conf_home))
+		help=f'Store new key in the {conf.git_conf_home} file (in user home directory).')
 
 
 	cmd = 'Encrypt file in-place or process stdin to stdout.'
-	cmd = cmds.add_parser('encrypt', help=cmd, description=cmd)
-	cmd.add_argument('path', nargs='?', help='Path to a file to encrypt.'
-		' If not specified, stdin/stdout streams will be used instead.')
+	cmd = cmds_add_parser('encrypt', help=cmd, description=cmd)
+	cmd.add_argument('path', nargs='?',
+		help='Path to a file to encrypt.'
+			' If not specified, stdin/stdout streams will be used instead.')
 	cmd.add_argument('-f', '--force', action='store_true',
 		help='Encrypt even if file appears to be encrypted already.')
 
 	cmd = 'Decrypt file in-place or process stdin to stdout.'
-	cmd = cmds.add_parser('decrypt', help=cmd, description=cmd)
-	cmd.add_argument('path', nargs='?', help='Path to a file to decrypt.'
-		' If not specified, stdin/stdout streams will be used instead.')
+	cmd = cmds_add_parser('decrypt', help=cmd, description=cmd)
+	cmd.add_argument('path', nargs='?',
+		help='Path to a file to decrypt.'
+			' If not specified, stdin/stdout streams will be used instead.')
 	cmd.add_argument('-f', '--force', action='store_true',
 		help='Decrypt even if file does not appear to be encrypted.')
 
 
 	cmd = 'Mark file(s) to be transparently encrypted in the current git repo.'
-	cmd = cmds.add_parser('taint', help=cmd, description=cmd,
+	cmd = cmds_add_parser('taint', help=cmd, description=cmd,
 		epilog='Adds files to .gitattributes (default)'
 				' or .git/info/attributes (see --local-only option).')
 
@@ -935,9 +971,9 @@ def main(args=None, defaults=None):
 
 
 	cmd = 'Remove transparent encryption mark from a file(s).'
-	cmd = cmds.add_parser('clear', help=cmd, description=cmd,
+	cmd = cmds_add_parser('clear', help=cmd, description=cmd,
 		epilog='Removes file(s) from .gitattributes (default)'
-				' or .git/info/attributes (see --local-only option).')
+			' or .git/info/attributes (see --local-only option).')
 
 	cmd.add_argument('path', nargs='+', help='Path of a file to unmark.')
 
@@ -952,7 +988,7 @@ def main(args=None, defaults=None):
 
 
 	cmd = 'Encrypt file before comitting it into git repository - "clean" from secrets.'
-	cmd = cmds.add_parser('git-clean', help=cmd, description=cmd,
+	cmd = cmds_add_parser('git-clean', help=cmd, description=cmd,
 		epilog='Intended to be only used by git, use "encrypt" command from terminal instead.')
 	cmd.add_argument('path', nargs='?',
 		help='Filename suppled by git.'
@@ -960,7 +996,7 @@ def main(args=None, defaults=None):
 				' to stdin and expects processing results from stdout.')
 
 	cmd = 'Decrypt file when getting it from git repository - "smudge" it with secrets.'
-	cmd = cmds.add_parser('git-smudge', help=cmd, description=cmd,
+	cmd = cmds_add_parser('git-smudge', help=cmd, description=cmd,
 		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
 	cmd.add_argument('path', nargs='?',
 		help='Filename suppled by git.'
@@ -968,7 +1004,7 @@ def main(args=None, defaults=None):
 				' to stdin and expects processing results from stdout.')
 
 	cmd = 'Decrypt file when getting it from git repository for diff generation purposes.'
-	cmd = cmds.add_parser('git-diff', help=cmd, description=cmd,
+	cmd = cmds_add_parser('git-diff', help=cmd, description=cmd,
 		epilog='Intended to be only used by git, use "decrypt" command from terminal instead.')
 	cmd.add_argument('path', help='Filename suppled by git.')
 
@@ -976,13 +1012,16 @@ def main(args=None, defaults=None):
 	opts = parser.parse_args(args)
 
 	logging.basicConfig(level=logging.DEBUG if opts.debug else logging.WARNING)
-	log = logging.getLogger('main')
+	log = get_logger('main')
 
 	# To avoid influence from any of the system-wide aliases
 	os.environ['GIT_CONFIG_NOSYSTEM'] = 'true'
 
 	with GitWrapper(conf, nacl) as git:
 		opts.parser = parser
+		if getattr(opts, 'path', None):
+			opts.path = ( list(map(pl.Path, opts.path))
+				if isinstance(opts.path, list) else pl.Path(opts.path) )
 		return run_command(opts, conf, nacl, git)
 
 

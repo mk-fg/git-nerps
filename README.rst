@@ -1,15 +1,17 @@
 git-nerps
 =========
 
-Tool to encrypt and manage selected files (or parts of files) under git repository.
+Tool to encrypt and manage secret files in git repository.
 
-Uses libsodium_ (wrapped by libnacl_ / PyNaCl_) encryption (`NaCl
-crypto_secretbox`_, see "Crypto details" section below for more info),
+Uses libsodium_ (wrapped by libnacl_ / PyNaCl_) encryption
+(`NaCl crypto_secretbox`_, see "Crypto details" section below for more info),
 gitattributes and git-config for configuration storage, which is partly shared
 with git and can be edited/adjusted by hand as well.
 
-All the stuff is implemented as one python (python2!) script, which has
-different commands.  See --help output for a full list of these.
+All the stuff is implemented as one python script
+(python3, though repo history has python2 version as well),
+which has different subcommands.
+See --help output for a full list of these.
 
 .. _libsodium: http://libsodium.org/
 .. _libnacl: http://libnacl.readthedocs.io/
@@ -54,9 +56,11 @@ this project.
 Usage
 -----
 
-See ``git-nerps --help`` for full list of all supported commands and common
-options, and e.g. ``git-nerps key-gen --help`` for args/opts to any particular
+See ``git nerps --help`` for full list of all supported commands and common
+options, and e.g. ``git nerps key-gen --help`` for args/opts to any particular
 command.
+
+"git-nerps" and "git nerps" commands be used interchangeably.
 
 
 Initialize repository configuration
@@ -66,8 +70,7 @@ Same as with most commands below, only makes sense to run in a git repository.
 
 ::
 
-  % git-nerps init
-
+  % git nerps init
 
 This is done automatically on any meaningful action (e.g. "key-gen"), so can
 usually be skipped.
@@ -94,7 +97,7 @@ Generate encryption keys
 
 ::
 
-  % git-nerps key-gen
+  % git nerps key-gen
 
   % tail -2 .git/config
   [nerps "key"]
@@ -121,39 +124,39 @@ but key explicitly set as "default" in the current repo will take priority.
 
 Extended example (from a fresh repository)::
 
-  % git-nerps key-gen
-  % git-nerps key-gen
+  % git nerps key-gen
+  % git nerps key-gen
 
-  % git-nerps key-gen -v
+  % git nerps key-gen -v
   Generated new key 'charlie':
     SZi85A55-RWKNFvDqTsq0T_ArANBoZw8DKEojtrLA8o=
 
-  % git-nerps key-gen --homedir homer
+  % git nerps key-gen --homedir homer
 
-  % git-nerps key-list
+  % git nerps key-list
   alfa [default]
   bravo
   charlie
   homer
 
-  % git-nerps key-set bravo
-  % git-nerps key-list
+  % git nerps key-set bravo
+  % git nerps key-list
   alfa
   bravo [default]
   charlie
   homer
 
-  % git-nerps key-gen --set-as-default
-  % git-nerps key-list
+  % git nerps key-gen --set-as-default
+  % git nerps key-list
   alfa
   bravo
   charlie
   delta [default]
   homer
 
-  % git-nerps key-unset
-  % git-nerps key-set --homedir homer
-  % git-nerps key-list
+  % git nerps key-unset
+  % git nerps key-set --homedir homer
+  % git nerps key-list
   alfa
   bravo
   charlie
@@ -167,7 +170,7 @@ Tool supports parsing such keys and deriving new ones from from them in a
 secure and fully deterministic fashion (using PBKDF2, see "Crypto details"
 section below) via --from-ssh-key option::
 
-  % git-nerps.py key-gen -v --from-ssh-key
+  % git nerps key-gen -v --from-ssh-key
   Key:
     6ykkvuyS7gX9FpxtjGkntJFlGvk_t4oGsIJAPsy_Hn4=
 
@@ -195,7 +198,7 @@ Mark new files to be encrypted
   backup_script.sh
 
   % cp ~/rsync_auth.txt .
-  % git-nerps taint rsync_auth.txt
+  % git nerps taint rsync_auth.txt
   % git add rsync_auth.txt .gitattributes
   % git commit -a -m 'Add rsync auth data'
 
@@ -204,7 +207,7 @@ Mark new files to be encrypted
   backup_script.sh
   rsync_auth.txt
 
-``git-nerps taint`` will add ``/rsync_auth.txt filter=nerps diff=nerps`` line
+``git nerps taint`` will add ``/rsync_auth.txt filter=nerps diff=nerps`` line
 to ".gitattributes" file (creating it, if necessary), so that contents of the
 file in the repository will always be transparently encrypted.
 
@@ -213,11 +216,11 @@ command will NOT rebase whole commit history to wipe or encrypt that file
 there - this can be done manually, but might be tricky (e.g. with many
 branches).
 
-``git-nerps taint`` also has -l/--local-only option to use
+``git nerps taint`` also has -l/--local-only option to use
 ".git/info/attributes" (which is not shared between repo clones) instead to
 the same effect.
 
-``git-nerps clear`` removes "taint" from file(s), if it's ever necessary.
+``git nerps clear`` removes "taint" from file(s), if it's ever necessary.
 
 Both "taint" and "clear" commands operate on gitattributes lines with patterns
 matching repo-relative path to specified file(s), making sure that there's
@@ -292,18 +295,18 @@ you need good and proven security margin.
 ::
 
   % echo password >secret.conf
-  % git-nerps encrypt secret.conf
+  % git nerps encrypt secret.conf
   % grep password secret.conf # encrypted file - no results
 
-  % git-nerps encrypt secret.conf
-  % git-nerps encrypt secret.conf # safe* to run multiple times
+  % git nerps encrypt secret.conf
+  % git nerps encrypt secret.conf # safe* to run multiple times
 
-  % git-nerps decrypt secret.conf
+  % git nerps decrypt secret.conf
   % cat secret.conf
   password
 
-  % git-nerps decrypt secret.conf
-  % git-nerps decrypt secret.conf # safe* to run on plaintext
+  % git nerps decrypt secret.conf
+  % git nerps decrypt secret.conf # safe* to run on plaintext
   % cat secret.conf
   password
 
@@ -373,20 +376,21 @@ Installation
 
 Requirements:
 
-* Python 2.7 (NOT 3.X).
+* Python 3.6+ (dig up repo history for old 2.x version)
 
-* PyNaCl_ or libnacl_ python module - either one will work, interoperable with
-  each other (and use same libsodium), no difference whatsoever.
+* libnacl_ or PyNaCl_ python module - either one will work,
+  and they're interoperable with each other (use same libsodium),
+  so which one is used makes no difference whatsoever.
 
-Both should be available in distro package repositories.
+Both deps should be available in distro package repositories.
 PyNaCl/libnacl can also be installed from PyPI via pip.
 
 Install git-nerps.py script to PATH and test if it works from there::
 
   % install -m0755 git-nerps.py /usr/local/bin/git-nerps
 
-  % git-nerps -h
-  usage: git-nerps [-h] [-d] [-n key-name] [-s] ...
+  % git nerps -h
+  usage: git nerps [-h] [-d] [-n key-name] [-s] ...
   ...
 
 That's it.
@@ -399,13 +403,13 @@ Drawbacks, quirks and warnings
 
 * DO NOT TRUST THIS TOOL TO BE UNIVERSALLY SECURE.
 
-  | I (author) don't use it to store data that is valuable, sensitive
-  | or can get me into trouble in any of my public git repositories.
+  | I (author) don't use it to store data that is valuable,
+  | sensitive or can get me in trouble in any of my public git repositories.
   | Not a single such file on my git server or github.
   | Think about it.
 
-  My use-case is to have shared configuration repositories, to which - if
-  everything goes well - there is no unsanctioned acces anyway, ever.
+  My use-case is to have shared configuration repositories, to which -
+  unless something goes wrong - there is no unsanctioned access anyway.
 
   Protection there is from accidental leaks, scraper bots or mildly curious
   hacker types, and it's fairly trivial to just change all secrets when/if
@@ -489,6 +493,17 @@ Drawbacks, quirks and warnings
 
   Never allow access to "repo/.git" directory over http(s) - alas, fairly common
   security issue, for many different reasons, but here especially so.
+
+
+* git caches plaintext --textconv results in local .git/objects/... files.
+
+  So even after loosing or deleting the key, it might be possible to recover cached
+  secrets from there, via ``git show --textconv`` or ``git log -u`` for example.
+
+  Hence it's unwise to ever share raw local ".git" dir with anything, if any
+  secret was ever added or comitted there, with or without git-nerps filtering.
+
+  Clone/push/pull operations do not transfer or use these caches in any way.
 
 
 * Name of the tool literally makes no sense. NERPS.
@@ -758,5 +773,5 @@ TODO
 
 * Command to show if stuff is/was/will-be encrypted.
 
-* Address errors from e.g. git-show for commits in different-key branches, maybe
-  just make these look nicer.
+* Address errors from e.g. git-show for commits in different-key branches,
+  or maybe just make these look nicer.
