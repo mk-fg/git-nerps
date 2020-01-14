@@ -298,7 +298,7 @@ class GitWrapper:
 
 			if not ver:
 				if not os.access(__file__, os.X_OK):
-					self.log.warn( 'This script ({}) must be executable'
+					self.log.warning( 'This script ({}) must be executable'
 						' (e.g. run "chmod +x" on it) for git filters to work!' )
 				script_link_abs = pl.Path(self.conf.script_link).expanduser()
 				if not script_link_abs.exists() or not script_link_abs.samefile(__file__):
@@ -699,7 +699,7 @@ def run_command(opts, conf, nacl, git):
 			if not is_encrypted(conf, src):
 				if opts.cmd != 'git-diff':
 					# XXX: filter history or at least detect whether that's the case
-					log.warn( '{} - file seem to be unencrypted in the repo'
+					log.warning( '{} - file seem to be unencrypted in the repo'
 						' (ignore this error when marking files with history): {}', opts.cmd, opts.path )
 				bin_stdout.write(src.read())
 			else:
