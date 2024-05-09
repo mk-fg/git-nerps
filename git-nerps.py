@@ -24,7 +24,7 @@ class Conf:
 	git_conf_home = '~/.git-nerps-keys'
 	git_conf_version = 1
 
-	enc_magic = '¯\_ʻnerpsʻ_/¯'.encode()
+	enc_magic = r'¯\_ʻnerpsʻ_/¯'.encode()
 	nonce_key = enc_magic
 	pbkdf2_salt = enc_magic
 	pbkdf2_rounds = int(5e5)
