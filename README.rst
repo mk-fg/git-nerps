@@ -23,6 +23,12 @@ See --help output for a full list of these.
 .. contents::
   :backlinks: none
 
+Repository URLs:
+
+- https://github.com/mk-fg/git-nerps
+- https://codeberg.org/mk-fg/git-nerps
+- https://fraggod.net/code/git/git-nerps
+
 
 
 Idea
@@ -656,6 +662,7 @@ Crypto details
 Links
 -----
 
+(from ~2015 when project was created - make sure to lookup more up-to-date tools)
 
 * `git-crypt project <https://www.agwa.name/projects/git-crypt/>`__
 
